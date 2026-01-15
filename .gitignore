@@ -1,0 +1,28 @@
+# Local models (large files)
+models/**
+!models/README.md
+
+# Environment / secrets
+.env
+
+# Virtualenvs
+.venv/
+.venv2/
+venv/
+ENV/
+
+# Python caches
+__pycache__/
+*.py[cod]
+
+# IDE
+.idea/
+
+# Runtime outputs
+output/
+debug/
+data/*.db
+data/*.db-journal
+
+# Misc
+.DS_Store

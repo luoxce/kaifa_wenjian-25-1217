@@ -1,0 +1,16 @@
+{
+  "action": "HOLD",
+  "symbol": "BTC",
+  "order_type": "MARKET",
+  "size_usd": 0.0,
+  "leverage": 1.0,
+  "margin_usd": 0.0,
+  "limit_price": null,
+  "take_profit": null,
+  "stop_loss": null,
+  "reduce_only": false,
+  "confidence": 65.0,
+  "meta": {
+    "commentary": "Technical analysis shows conflicting signals: strong uptrend (ADX 37.95, price above EMAs) but bearish MACD and KDJ cross. Market snapshot shows BTC at $87,849 with RSI 59.76 (neutral). Account has existing BTC long position with 7.4% unrealized PnL. Balanced profile suggests waiting for clearer setup. No strong catalyst or edge to justify new position. Respect risk discipline and portfolio concentration rules."
+  }
+}

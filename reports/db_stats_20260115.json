@@ -1,0 +1,320 @@
+{
+  "generated_at": "2026-01-15T14:31:09.468519+00:00",
+  "database_url": "sqlite:///data/alpha_arena.db",
+  "tables": {
+    "backtest_configs": {
+      "rows": 0,
+      "time_column": "created_at",
+      "min_ts": null,
+      "max_ts": null,
+      "last_ts": null,
+      "min_iso": null,
+      "max_iso": null,
+      "last_iso": null
+    },
+    "backtest_decisions": {
+      "rows": 0,
+      "time_column": "timestamp",
+      "min_ts": null,
+      "max_ts": null,
+      "last_ts": null,
+      "min_iso": null,
+      "max_iso": null,
+      "last_iso": null
+    },
+    "backtest_orders": {
+      "rows": 0,
+      "time_column": "timestamp",
+      "min_ts": null,
+      "max_ts": null,
+      "last_ts": null,
+      "min_iso": null,
+      "max_iso": null,
+      "last_iso": null
+    },
+    "backtest_positions": {
+      "rows": 0,
+      "time_column": "timestamp",
+      "min_ts": null,
+      "max_ts": null,
+      "last_ts": null,
+      "min_iso": null,
+      "max_iso": null,
+      "last_iso": null
+    },
+    "backtest_results": {
+      "rows": 0,
+      "time_column": "created_at",
+      "min_ts": null,
+      "max_ts": null,
+      "last_ts": null,
+      "min_iso": null,
+      "max_iso": null,
+      "last_iso": null
+    },
+    "balances": {
+      "rows": 0,
+      "time_column": "timestamp",
+      "min_ts": null,
+      "max_ts": null,
+      "last_ts": null,
+      "min_iso": null,
+      "max_iso": null,
+      "last_iso": null
+    },
+    "decisions": {
+      "rows": 0,
+      "time_column": "timestamp",
+      "min_ts": null,
+      "max_ts": null,
+      "last_ts": null,
+      "min_iso": null,
+      "max_iso": null,
+      "last_iso": null
+    },
+    "funding_rates": {
+      "rows": 6,
+      "time_column": "timestamp",
+      "min_ts": 1768150882129,
+      "max_ts": 1768487456017,
+      "last_ts": 1768487456017,
+      "min_iso": "2026-01-11T17:01:22.129000+00:00",
+      "max_iso": "2026-01-15T14:30:56.017000+00:00",
+      "last_iso": "2026-01-15T14:30:56.017000+00:00"
+    },
+    "ingestion_runs": {
+      "rows": 42,
+      "time_column": "started_at",
+      "min_ts": 1768150881,
+      "max_ts": 1768487458,
+      "last_ts": 1768487458,
+      "min_iso": "1970-01-21T11:09:10.881000+00:00",
+      "max_iso": "1970-01-21T11:14:47.458000+00:00",
+      "last_iso": "1970-01-21T11:14:47.458000+00:00"
+    },
+    "llm_runs": {
+      "rows": 0,
+      "time_column": "timestamp",
+      "min_ts": null,
+      "max_ts": null,
+      "last_ts": null,
+      "min_iso": null,
+      "max_iso": null,
+      "last_iso": null
+    },
+    "long_short_ratio": {
+      "rows": 0,
+      "time_column": "timestamp",
+      "min_ts": null,
+      "max_ts": null,
+      "last_ts": null,
+      "min_iso": null,
+      "max_iso": null,
+      "last_iso": null
+    },
+    "market_data": {
+      "rows": 4304,
+      "time_column": "timestamp",
+      "min_ts": 1765559700000,
+      "max_ts": 1768487400000,
+      "last_ts": 1768487400000,
+      "min_iso": "2025-12-12T17:15:00+00:00",
+      "max_iso": "2026-01-15T14:30:00+00:00",
+      "last_iso": "2026-01-15T14:30:00+00:00"
+    },
+    "model_versions": {
+      "rows": 0,
+      "time_column": "created_at",
+      "min_ts": null,
+      "max_ts": null,
+      "last_ts": null,
+      "min_iso": null,
+      "max_iso": null,
+      "last_iso": null
+    },
+    "open_interest": {
+      "rows": 0,
+      "time_column": "timestamp",
+      "min_ts": null,
+      "max_ts": null,
+      "last_ts": null,
+      "min_iso": null,
+      "max_iso": null,
+      "last_iso": null
+    },
+    "order_lifecycle_events": {
+      "rows": 0,
+      "time_column": "timestamp",
+      "min_ts": null,
+      "max_ts": null,
+      "last_ts": null,
+      "min_iso": null,
+      "max_iso": null,
+      "last_iso": null
+    },
+    "orders": {
+      "rows": 0,
+      "time_column": "created_at",
+      "min_ts": null,
+      "max_ts": null,
+      "last_ts": null,
+      "min_iso": null,
+      "max_iso": null,
+      "last_iso": null
+    },
+    "position_snapshots": {
+      "rows": 0,
+      "time_column": "timestamp",
+      "min_ts": null,
+      "max_ts": null,
+      "last_ts": null,
+      "min_iso": null,
+      "max_iso": null,
+      "last_iso": null
+    },
+    "positions": {
+      "rows": 0,
+      "time_column": "updated_at",
+      "min_ts": null,
+      "max_ts": null,
+      "last_ts": null,
+      "min_iso": null,
+      "max_iso": null,
+      "last_iso": null
+    },
+    "price_snapshots": {
+      "rows": 6,
+      "time_column": "timestamp",
+      "min_ts": 1768150883955,
+      "max_ts": 1768487454508,
+      "last_ts": 1768487454508,
+      "min_iso": "2026-01-11T17:01:23.955000+00:00",
+      "max_iso": "2026-01-15T14:30:54.508000+00:00",
+      "last_iso": "2026-01-15T14:30:54.508000+00:00"
+    },
+    "prompt_versions": {
+      "rows": 0,
+      "time_column": "created_at",
+      "min_ts": null,
+      "max_ts": null,
+      "last_ts": null,
+      "min_iso": null,
+      "max_iso": null,
+      "last_iso": null
+    },
+    "risk_events": {
+      "rows": 0,
+      "time_column": "timestamp",
+      "min_ts": null,
+      "max_ts": null,
+      "last_ts": null,
+      "min_iso": null,
+      "max_iso": null,
+      "last_iso": null
+    },
+    "schema_version": {
+      "rows": 2,
+      "time_column": "applied_at",
+      "min_ts": 1768149338,
+      "max_ts": 1768487347,
+      "last_ts": 1768487347,
+      "min_iso": "1970-01-21T11:09:09.338000+00:00",
+      "max_iso": "1970-01-21T11:14:47.347000+00:00",
+      "last_iso": "1970-01-21T11:14:47.347000+00:00"
+    },
+    "sqlite_sequence": {
+      "rows": 4,
+      "time_column": null
+    },
+    "trades": {
+      "rows": 0,
+      "time_column": "timestamp",
+      "min_ts": null,
+      "max_ts": null,
+      "last_ts": null,
+      "min_iso": null,
+      "max_iso": null,
+      "last_iso": null
+    }
+  },
+  "market_data": {
+    "series": [
+      {
+        "symbol": "BTC/USDT:USDT",
+        "timeframe": "15m",
+        "interval_ms": 900000,
+        "count": 3254,
+        "unique_count": 3254,
+        "min_ts": 1765559700000,
+        "max_ts": 1768487400000,
+        "last_ts": 1768487400000,
+        "min_iso": "2025-12-12T17:15:00+00:00",
+        "max_iso": "2026-01-15T14:30:00+00:00",
+        "last_iso": "2026-01-15T14:30:00+00:00",
+        "expected_bars": 3254,
+        "missing": 0,
+        "duplicate_count": 0,
+        "non_monotonic": 0,
+        "gap_list": []
+      },
+      {
+        "symbol": "BTC/USDT:USDT",
+        "timeframe": "1d",
+        "interval_ms": 86400000,
+        "count": 34,
+        "unique_count": 34,
+        "min_ts": 1765584000000,
+        "max_ts": 1768435200000,
+        "last_ts": 1768435200000,
+        "min_iso": "2025-12-13T00:00:00+00:00",
+        "max_iso": "2026-01-15T00:00:00+00:00",
+        "last_iso": "2026-01-15T00:00:00+00:00",
+        "expected_bars": 34,
+        "missing": 0,
+        "duplicate_count": 0,
+        "non_monotonic": 0,
+        "gap_list": []
+      },
+      {
+        "symbol": "BTC/USDT:USDT",
+        "timeframe": "1h",
+        "interval_ms": 3600000,
+        "count": 813,
+        "unique_count": 813,
+        "min_ts": 1765562400000,
+        "max_ts": 1768485600000,
+        "last_ts": 1768485600000,
+        "min_iso": "2025-12-12T18:00:00+00:00",
+        "max_iso": "2026-01-15T14:00:00+00:00",
+        "last_iso": "2026-01-15T14:00:00+00:00",
+        "expected_bars": 813,
+        "missing": 0,
+        "duplicate_count": 0,
+        "non_monotonic": 0,
+        "gap_list": []
+      },
+      {
+        "symbol": "BTC/USDT:USDT",
+        "timeframe": "4h",
+        "interval_ms": 14400000,
+        "count": 203,
+        "unique_count": 203,
+        "min_ts": 1765569600000,
+        "max_ts": 1768478400000,
+        "last_ts": 1768478400000,
+        "min_iso": "2025-12-12T20:00:00+00:00",
+        "max_iso": "2026-01-15T12:00:00+00:00",
+        "last_iso": "2026-01-15T12:00:00+00:00",
+        "expected_bars": 203,
+        "missing": 0,
+        "duplicate_count": 0,
+        "non_monotonic": 0,
+        "gap_list": []
+      }
+    ],
+    "sanity_totals": {
+      "invalid_volume": 0,
+      "invalid_high_low": 0
+    }
+  }
+}
