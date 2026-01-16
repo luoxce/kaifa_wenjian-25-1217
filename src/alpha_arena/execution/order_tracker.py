@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Iterable, Optional
 
@@ -13,6 +14,19 @@ from alpha_arena.utils.time import utc_now_ms, utc_now_s
 
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_float(value: object) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str) and value.strip() == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 class OrderTracker:
@@ -128,6 +142,10 @@ class OrderTracker:
                 old_status,
                 new_status.value,
                 f"PARTIAL_FILL filled={filled}",
+                symbol=row.get("symbol"),
+                response=response,
+                fill_qty=float(filled),
+                fill_price=_safe_float(average_price),
             )
 
         status_changed = new_status.value != old_status
@@ -138,6 +156,10 @@ class OrderTracker:
                 old_status,
                 new_status.value,
                 event,
+                symbol=row.get("symbol"),
+                response=response,
+                fill_qty=_safe_float(filled),
+                fill_price=_safe_float(average_price),
             )
 
         if status_changed or filled is not None:
@@ -209,13 +231,54 @@ class OrderTracker:
             return "ORDER_REJECTED"
         return "ORDER_UPDATE"
 
-    def _record_event(self, order_id: str, from_status: str, to_status: str, message: str) -> None:
+    def _record_event(
+        self,
+        order_id: str,
+        from_status: str,
+        to_status: str,
+        message: str,
+        *,
+        symbol: Optional[str] = None,
+        response: Optional[dict] = None,
+        fill_qty: Optional[float] = None,
+        fill_price: Optional[float] = None,
+    ) -> None:
         try:
             from_enum = OrderStatus(from_status) if from_status else None
         except Exception:
             from_enum = None
         to_enum = OrderStatus(to_status)
-        self.lifecycle_manager.record_event(order_id, from_enum, to_enum, message)
+        payload = json.dumps(response, ensure_ascii=True) if response is not None else None
+        exchange_status = None
+        exchange_ts = None
+        trade_id = None
+        fee = None
+        fee_currency = None
+        if response:
+            exchange_status = response.get("status")
+            exchange_ts = response.get("timestamp")
+            trade_id = response.get("tradeId") or response.get("id")
+            fee_info = response.get("fee")
+            if isinstance(fee_info, dict):
+                fee = fee_info.get("cost")
+                fee_currency = fee_info.get("currency")
+        self.lifecycle_manager.record_event(
+            order_id,
+            from_enum,
+            to_enum,
+            message,
+            exchange="okx",
+            symbol=symbol or (response.get("symbol") if response else None),
+            exchange_status=exchange_status,
+            exchange_event_ts=exchange_ts,
+            raw_payload=payload,
+            client_order_id=order_id,
+            trade_id=trade_id,
+            fill_qty=fill_qty,
+            fill_price=fill_price,
+            fee=fee,
+            fee_currency=fee_currency,
+        )
 
     def _persist_trade(
         self,

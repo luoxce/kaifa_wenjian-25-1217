@@ -1,15 +1,43 @@
-import type { MarketDataSnapshot } from "@/hooks/useMarketData";
+import { useState } from "react";
 
 import HeaderBar from "@/components/dashboard/HeaderBar";
 import ChartStage from "@/components/dashboard/ChartStage";
 import DecisionStream from "@/components/dashboard/DecisionStream";
 import ExecutionDeck from "@/components/dashboard/ExecutionDeck";
+import { useMarketData } from "@/hooks/useMarketData";
 
-interface DashboardLayoutProps {
-  data: MarketDataSnapshot;
-}
+const defaultSymbol =
+  (import.meta.env.VITE_DASHBOARD_SYMBOL as string | undefined) ??
+  "BTC/USDT:USDT";
+const defaultTimeframe =
+  (import.meta.env.VITE_DASHBOARD_TIMEFRAME as string | undefined) ?? "15m";
+const allowedTimeframes = ["15m", "1h", "1d"];
+const defaultLimitRaw = import.meta.env.VITE_DASHBOARD_LIMIT as
+  | string
+  | undefined;
+const defaultLimit = Number.isFinite(Number(defaultLimitRaw))
+  ? Number(defaultLimitRaw)
+  : 200;
 
-export default function DashboardLayout({ data }: DashboardLayoutProps) {
+export default function DashboardLayout() {
+  const initialTimeframe = allowedTimeframes.includes(defaultTimeframe)
+    ? defaultTimeframe
+    : "15m";
+  const [timeframe, setTimeframe] = useState(initialTimeframe);
+  const { data, isLoading } = useMarketData({
+    symbol: defaultSymbol,
+    timeframe,
+    limit: defaultLimit,
+  });
+
+  if (isLoading || !data) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-[#050505] text-slate-400">
+        Loading dashboard...
+      </div>
+    );
+  }
+
   const { health, candles, orders, positions, decisions } = data;
   return (
     <div className="min-h-screen bg-[#050505] text-slate-100">
@@ -19,10 +47,12 @@ export default function DashboardLayout({ data }: DashboardLayoutProps) {
         </div>
         <div className="col-start-1 row-start-2">
           <ChartStage
-            symbol="BTC/USDT:USDT"
-            timeframe="15m"
+            symbol={defaultSymbol}
+            timeframe={timeframe}
             candles={candles}
             orders={orders}
+            onTimeframeChange={setTimeframe}
+            timeframeOptions={allowedTimeframes}
           />
         </div>
         <div className="col-start-2 row-start-2 row-span-2">
@@ -35,4 +65,3 @@ export default function DashboardLayout({ data }: DashboardLayoutProps) {
     </div>
   );
 }
-

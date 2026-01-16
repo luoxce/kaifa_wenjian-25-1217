@@ -12,6 +12,12 @@ import type { Candle, Order } from "@/types/schema";
 interface PriceChartProps {
   candles: Candle[];
   orders: Order[];
+  overlays?: Array<{
+    id: string;
+    name: string;
+    color: string;
+    data: Array<{ time: number; value: number }>;
+  }>;
 }
 
 const chartOptions = {
@@ -36,18 +42,30 @@ const chartOptions = {
   },
 };
 
-export default function PriceChart({ candles, orders }: PriceChartProps) {
+export default function PriceChart({ candles, orders, overlays }: PriceChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const volumeContainerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
+  const volumeChartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const histogramRef = useRef<ISeriesApi<"Histogram"> | null>(null);
+  const overlaysRef = useRef<Map<string, ISeriesApi<"Line">>>(new Map());
   const rangeRef = useRef<{ min: number; max: number } | null>(null);
   const rangeSeedRef = useRef<number | null>(null);
 
   useEffect(() => {
-    if (!containerRef.current) return;
-    const chart = createChart(containerRef.current, chartOptions);
+    if (!containerRef.current || !volumeContainerRef.current) return;
+    const chart = createChart(containerRef.current, {
+      ...chartOptions,
+      timeScale: { ...chartOptions.timeScale, visible: false },
+    });
+    const volumeChart = createChart(volumeContainerRef.current, {
+      ...chartOptions,
+      crosshair: { vertLine: { color: "#1f2937", visible: false }, horzLine: { visible: false } },
+      rightPriceScale: { ...chartOptions.rightPriceScale, visible: false },
+    });
     chartRef.current = chart;
+    volumeChartRef.current = volumeChart;
     const series = chart.addCandlestickSeries({
       upColor: "#00ff9d",
       downColor: "#ff0055",
@@ -57,20 +75,40 @@ export default function PriceChart({ candles, orders }: PriceChartProps) {
     });
     seriesRef.current = series;
 
-    const histogram = chart.addHistogramSeries({
+    const histogram = volumeChart.addHistogramSeries({
       color: "#3b82f6",
-      priceScaleId: "signal",
+      priceScaleId: "volume",
       priceFormat: { type: "volume" },
       base: 0,
-      scaleMargins: { top: 0.8, bottom: 0 },
+      scaleMargins: { top: 0.1, bottom: 0 },
     });
     histogramRef.current = histogram;
 
+    let syncing = false;
+    const syncToVolume = (range: unknown) => {
+      if (!range || syncing) return;
+      syncing = true;
+      volumeChart.timeScale().setVisibleLogicalRange(range as any);
+      syncing = false;
+    };
+    const syncToMain = (range: unknown) => {
+      if (!range || syncing) return;
+      syncing = true;
+      chart.timeScale().setVisibleLogicalRange(range as any);
+      syncing = false;
+    };
+    chart.timeScale().subscribeVisibleLogicalRangeChange(syncToVolume);
+    volumeChart.timeScale().subscribeVisibleLogicalRangeChange(syncToMain);
+
     const handleResize = () => {
-      if (!containerRef.current || !chartRef.current) return;
-      chartRef.current.applyOptions({
+      if (!containerRef.current || !volumeContainerRef.current) return;
+      chart.applyOptions({
         width: containerRef.current.clientWidth,
         height: containerRef.current.clientHeight,
+      });
+      volumeChart.applyOptions({
+        width: volumeContainerRef.current.clientWidth,
+        height: volumeContainerRef.current.clientHeight,
       });
     };
     handleResize();
@@ -78,7 +116,10 @@ export default function PriceChart({ candles, orders }: PriceChartProps) {
 
     return () => {
       window.removeEventListener("resize", handleResize);
+      chart.timeScale().unsubscribeVisibleLogicalRangeChange(syncToVolume);
+      volumeChart.timeScale().unsubscribeVisibleLogicalRangeChange(syncToMain);
       chart.remove();
+      volumeChart.remove();
     };
   }, []);
 
@@ -96,7 +137,7 @@ export default function PriceChart({ candles, orders }: PriceChartProps) {
     if (histogramRef.current) {
       const histData = candles.map((candle) => {
         const diff = candle.close - candle.open;
-        const value = Math.abs(diff);
+        const value = candle.volume ?? 0;
         return {
           time: candle.time,
           value,
@@ -153,7 +194,42 @@ export default function PriceChart({ candles, orders }: PriceChartProps) {
     }
   }, [candles, orders]);
 
-  return <div ref={containerRef} className="h-full w-full" />;
+  useEffect(() => {
+    if (!chartRef.current) return;
+    const existing = overlaysRef.current;
+    const nextIds = new Set<string>();
+    (overlays ?? []).forEach((overlay) => {
+      nextIds.add(overlay.id);
+      if (!existing.has(overlay.id)) {
+        const lineSeries = chartRef.current!.addLineSeries({
+          color: overlay.color,
+          lineWidth: 2,
+        });
+        existing.set(overlay.id, lineSeries);
+      }
+      existing.get(overlay.id)?.setData(overlay.data);
+    });
+
+    Array.from(existing.keys()).forEach((id) => {
+      if (!nextIds.has(id)) {
+        const series = existing.get(id);
+        if (series) {
+          chartRef.current?.removeSeries(series);
+        }
+        existing.delete(id);
+      }
+    });
+  }, [overlays]);
+
+  return (
+    <div className="flex h-full w-full flex-col">
+      <div ref={containerRef} className="flex-[4] min-h-0" />
+      <div
+        ref={volumeContainerRef}
+        className="flex-[1] min-h-0 border-t border-[#27272a]"
+      />
+    </div>
+  );
 }
 
 const candleTimeFallback = (candles: Candle[]) => {

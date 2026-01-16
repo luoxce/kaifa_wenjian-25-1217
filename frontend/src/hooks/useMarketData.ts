@@ -18,19 +18,36 @@ export interface MarketDataSnapshot {
   decisions: StrategyDecision[];
 }
 
+export interface MarketDataOptions {
+  symbol?: string;
+  timeframe?: string;
+  limit?: number;
+}
+
 const apiBase = import.meta.env.VITE_API_BASE_URL as string | undefined;
+const dashboardSymbol =
+  (import.meta.env.VITE_DASHBOARD_SYMBOL as string | undefined) ??
+  "BTC/USDT:USDT";
+const dashboardTimeframe =
+  (import.meta.env.VITE_DASHBOARD_TIMEFRAME as string | undefined) ?? "15m";
+const dashboardLimitRaw = import.meta.env.VITE_DASHBOARD_LIMIT as
+  | string
+  | undefined;
+const dashboardLimit = Number.isFinite(Number(dashboardLimitRaw))
+  ? Number(dashboardLimitRaw)
+  : 200;
 
 const rand = (min: number, max: number) =>
   Math.random() * (max - min) + min;
 
-let mockCache: MarketDataSnapshot | null = null;
+const mockCache = new Map<string, MarketDataSnapshot>();
 
-const mockCandles = (points = 120): Candle[] => {
+const mockCandles = (points = 120, timeframe = dashboardTimeframe): Candle[] => {
   const data: Candle[] = [];
   let lastClose = 64000 + rand(-500, 500);
   const now = Math.floor(Date.now() / 1000);
   for (let i = points - 1; i >= 0; i -= 1) {
-    const time = now - i * 60 * 15;
+    const time = now - i * timeframeToSeconds(timeframe);
     const open = lastClose + rand(-120, 120);
     const close = open + rand(-160, 160);
     const high = Math.max(open, close) + rand(20, 140);
@@ -49,11 +66,16 @@ const mockCandles = (points = 120): Candle[] => {
   return data;
 };
 
-const mockSnapshot = (): MarketDataSnapshot => {
-  if (!mockCache) {
-    const candles = mockCandles(160);
+const mockSnapshot = (
+  symbol: string,
+  timeframe: string,
+  limit: number
+): MarketDataSnapshot => {
+  const key = `${symbol}-${timeframe}-${limit}`;
+  if (!mockCache.has(key)) {
+    const candles = mockCandles(Math.max(120, Math.min(limit, 800)), timeframe);
     const last = candles[candles.length - 1];
-    mockCache = {
+    mockCache.set(key, {
       health: {
         status: "ok",
         latency_ms: Math.round(rand(40, 120)),
@@ -73,7 +95,7 @@ const mockSnapshot = (): MarketDataSnapshot => {
       orders: [
         {
           order_id: "ord-101",
-          symbol: "BTC/USDT:USDT",
+          symbol,
           side: "BUY",
           status: "FILLED",
           price: last.close - 120,
@@ -82,7 +104,7 @@ const mockSnapshot = (): MarketDataSnapshot => {
         },
         {
           order_id: "ord-102",
-          symbol: "BTC/USDT:USDT",
+          symbol,
           side: "SELL",
           status: "NEW",
           price: last.close + 180,
@@ -92,7 +114,7 @@ const mockSnapshot = (): MarketDataSnapshot => {
       ],
       positions: [
         {
-          symbol: "BTC/USDT:USDT",
+          symbol,
           side: "long",
           size: 0.05,
           entry_price: last.close - 320,
@@ -116,38 +138,45 @@ const mockSnapshot = (): MarketDataSnapshot => {
           reasoning: "Bands expanding; waiting for confirmation.",
         },
       ],
-    };
+    });
   }
+  const base = mockCache.get(key)!;
   return {
-    ...mockCache,
+    ...base,
     health: {
-      ...mockCache.health,
+      ...base.health,
       latency_ms: Math.round(rand(40, 120)),
       last_sync_time: Date.now(),
     },
   };
 };
 
-const fetchSnapshot = async (): Promise<MarketDataSnapshot> => {
+const fetchSnapshot = async (
+  symbol: string,
+  timeframe: string,
+  limit: number
+): Promise<MarketDataSnapshot> => {
   if (!apiBase) {
-    return mockSnapshot();
+    return mockSnapshot(symbol, timeframe, limit);
   }
   try {
     const health = await fetch(`${apiBase}/api/health`).then((r) => r.json());
     const candles = await fetch(
-      `${apiBase}/api/market/candles?symbol=BTC/USDT:USDT&timeframe=15m&limit=200`
+      `${apiBase}/api/market/candles?symbol=${encodeURIComponent(
+        symbol
+      )}&timeframe=${timeframe}&limit=${limit}`
     ).then((r) => r.json());
     const account = await fetch(`${apiBase}/api/account/summary`).then((r) =>
       r.json()
     );
     const decisions = await fetch(
-      `${apiBase}/api/decisions?symbol=BTC/USDT:USDT&limit=50`
+      `${apiBase}/api/decisions?symbol=${encodeURIComponent(symbol)}&limit=50`
     ).then((r) => r.json());
     const orders = await fetch(
-      `${apiBase}/api/orders?symbol=BTC/USDT:USDT&limit=50`
+      `${apiBase}/api/orders?symbol=${encodeURIComponent(symbol)}&limit=50`
     ).then((r) => r.json());
     const positions = await fetch(
-      `${apiBase}/api/positions?symbol=BTC/USDT:USDT`
+      `${apiBase}/api/positions?symbol=${encodeURIComponent(symbol)}`
     ).then((r) => r.json());
 
     return {
@@ -159,13 +188,30 @@ const fetchSnapshot = async (): Promise<MarketDataSnapshot> => {
       decisions: decisions?.data || [],
     };
   } catch (error) {
-    return mockSnapshot();
+    return mockSnapshot(symbol, timeframe, limit);
   }
 };
 
-export const useMarketData = () =>
-  useQuery({
-    queryKey: ["market-data"],
-    queryFn: fetchSnapshot,
+export const useMarketData = (options?: MarketDataOptions) => {
+  const symbol = options?.symbol ?? dashboardSymbol;
+  const timeframe = options?.timeframe ?? dashboardTimeframe;
+  const limit = options?.limit ?? dashboardLimit;
+  return useQuery({
+    queryKey: ["market-data", symbol, timeframe, limit],
+    queryFn: () => fetchSnapshot(symbol, timeframe, limit),
     refetchInterval: 5000,
   });
+};
+
+const timeframeToSeconds = (timeframe: string) => {
+  if (timeframe.endsWith("m")) {
+    return Number(timeframe.replace("m", "")) * 60;
+  }
+  if (timeframe.endsWith("h")) {
+    return Number(timeframe.replace("h", "")) * 60 * 60;
+  }
+  if (timeframe.endsWith("d")) {
+    return Number(timeframe.replace("d", "")) * 24 * 60 * 60;
+  }
+  return 60 * 15;
+};

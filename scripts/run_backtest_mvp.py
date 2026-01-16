@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import sys
 from typing import Dict, List, Optional, Tuple
+import uuid
 
 import pandas as pd
 
@@ -100,6 +101,11 @@ class BacktestRecorder:
         self.strategy_payload = strategy_payload
         self._conn = get_connection()
         self.config_id, self.backtest_id = self._start_session()
+        self.run_id: Optional[str] = None
+        self._run_row_id: Optional[int] = None
+        self._has_backtest_runs = self._check_backtest_runs()
+        if self._has_backtest_runs:
+            self.run_id, self._run_row_id = self._start_backtest_run()
 
     def close(self) -> None:
         if self._conn is not None:
@@ -140,6 +146,45 @@ class BacktestRecorder:
         backtest_id = int(cur.lastrowid)
         self._conn.commit()
         return config_id, backtest_id
+
+    def _check_backtest_runs(self) -> bool:
+        rows = self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='backtest_runs'"
+        ).fetchall()
+        return bool(rows)
+
+    def _start_backtest_run(self) -> Tuple[str, int]:
+        run_id = uuid.uuid4().hex
+        payload = json.dumps(self.strategy_payload, ensure_ascii=True)
+        cur = self._conn.execute(
+            """
+            INSERT INTO backtest_runs (
+                run_id,
+                created_at,
+                symbol,
+                timeframe,
+                start_ts,
+                end_ts,
+                initial_capital,
+                params_json,
+                schema_version
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                utc_now_s(),
+                self.symbol,
+                self.timeframe,
+                self.start_ts,
+                self.end_ts,
+                self.initial_capital,
+                payload,
+                1,
+            ),
+        )
+        self._conn.commit()
+        return run_id, int(cur.lastrowid)
 
     def record_decision(self, signal: StrategySignal) -> None:
         payload = json.dumps(
@@ -272,6 +317,36 @@ class BacktestRecorder:
             ),
         )
         self._conn.commit()
+
+        if self._has_backtest_runs and self._run_row_id:
+            metrics_json = json.dumps(metrics, ensure_ascii=True)
+            equity_curve_json = json.dumps(results["equity_curve"], ensure_ascii=True)
+            self._conn.execute(
+                """
+                UPDATE backtest_runs
+                SET metrics_json = ?,
+                    equity_curve_json = ?,
+                    total_return = ?,
+                    max_drawdown = ?,
+                    win_rate = ?,
+                    profit_factor = ?,
+                    sharpe_ratio = ?,
+                    final_equity = ?
+                WHERE id = ?
+                """,
+                (
+                    metrics_json,
+                    equity_curve_json,
+                    metrics.get("total_return_pct"),
+                    metrics.get("max_drawdown_pct"),
+                    metrics.get("win_rate_pct"),
+                    metrics.get("profit_factor"),
+                    metrics.get("sharpe_ratio"),
+                    results.get("final_equity"),
+                    self._run_row_id,
+                ),
+            )
+            self._conn.commit()
 
 
 class SimpleBacktester:

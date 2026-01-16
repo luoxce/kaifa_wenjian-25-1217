@@ -19,6 +19,7 @@ sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
 
 from alpha_arena.config import settings
 from alpha_arena.data import DataService
+from alpha_arena.data.health import coverage_summary, scan_integrity, repair_candles
 from alpha_arena.execution.okx_executor import OKXOrderExecutor
 from alpha_arena.execution.order_tracker import OrderTracker
 from alpha_arena.ingest.okx import ingest_all
@@ -50,6 +51,32 @@ def _connect(db_path: str) -> sqlite3.Connection:
 def _get_columns(conn: sqlite3.Connection, table: str) -> List[str]:
     rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
     return [row["name"] for row in rows]
+
+
+class ScanRequest(BaseModel):
+    symbol: str
+    timeframes: list[str]
+    range_start_ts: Optional[int] = None
+    range_end_ts: Optional[int] = None
+
+
+class RepairRequest(BaseModel):
+    symbol: str
+    timeframe: str
+    range_start_ts: int
+    range_end_ts: int
+    mode: str = "refetch"
+
+
+class BacktestRequest(BaseModel):
+    symbol: str
+    timeframe: str
+    strategy: str
+    limit: int = 2000
+    signal_window: int = 300
+    initial_capital: float = 10000.0
+    fee_rate: float = 0.0005
+    name: Optional[str] = None
 
 
 def create_app(db_path: str) -> FastAPI:
@@ -343,54 +370,194 @@ def create_app(db_path: str) -> FastAPI:
     @app.get("/api/backtests", response_class=JSONResponse)
     def api_backtests(limit: int = Query(20, ge=1, le=200)) -> JSONResponse:
         with _connect(db_path) as conn:
-            rows = conn.execute(
-                """
-                SELECT r.id AS backtest_id,
-                       c.name,
-                       c.symbol,
-                       c.timeframe,
-                       r.total_return,
-                       r.max_drawdown,
-                       r.sharpe_ratio,
-                       r.profit_factor,
-                       r.win_rate,
-                       r.final_equity,
-                       r.created_at
-                FROM backtest_results r
-                JOIN backtest_configs c ON c.id = r.config_id
-                ORDER BY r.created_at DESC
-                LIMIT ?
-                """,
-                (limit,),
-            ).fetchall()
+            has_runs = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='backtest_runs'"
+            ).fetchone()
+            if has_runs:
+                rows = conn.execute(
+                    """
+                    SELECT id AS backtest_id,
+                           run_id,
+                           symbol,
+                           timeframe,
+                           total_return,
+                           max_drawdown,
+                           sharpe_ratio,
+                           profit_factor,
+                           win_rate,
+                           final_equity,
+                           created_at,
+                           metrics_json
+                    FROM backtest_runs
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT r.id AS backtest_id,
+                           c.name,
+                           c.symbol,
+                           c.timeframe,
+                           r.total_return,
+                           r.max_drawdown,
+                           r.sharpe_ratio,
+                           r.profit_factor,
+                           r.win_rate,
+                           r.final_equity,
+                           r.created_at
+                    FROM backtest_results r
+                    JOIN backtest_configs c ON c.id = r.config_id
+                    ORDER BY r.created_at DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
         return JSONResponse({"data": [dict(row) for row in rows]})
 
     @app.get("/api/backtests/{backtest_id}", response_class=JSONResponse)
     def api_backtest_detail(backtest_id: int) -> JSONResponse:
         with _connect(db_path) as conn:
-            row = conn.execute(
-                """
-                SELECT r.*, c.name, c.symbol, c.timeframe, c.initial_capital, c.commission_rate
-                FROM backtest_results r
-                JOIN backtest_configs c ON c.id = r.config_id
-                WHERE r.id = ?
-                """,
-                (backtest_id,),
+            has_runs = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='backtest_runs'"
             ).fetchone()
+            row = None
+            use_runs = False
+            if has_runs:
+                row = conn.execute(
+                    """
+                    SELECT *
+                    FROM backtest_runs
+                    WHERE id = ?
+                    """,
+                    (backtest_id,),
+                ).fetchone()
+                if row is not None:
+                    use_runs = True
+
+            if row is None:
+                row = conn.execute(
+                    """
+                    SELECT r.*, c.name, c.symbol, c.timeframe, c.initial_capital, c.commission_rate
+                    FROM backtest_results r
+                    JOIN backtest_configs c ON c.id = r.config_id
+                    WHERE r.id = ?
+                    """,
+                    (backtest_id,),
+                ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Backtest not found.")
         payload = dict(row)
+        if use_runs:
+            with _connect(db_path) as conn:
+                legacy = conn.execute(
+                    "SELECT trade_log, equity_curve FROM backtest_results WHERE id = ?",
+                    (backtest_id,),
+                ).fetchone()
+            if legacy:
+                if legacy["trade_log"] is not None:
+                    payload["trade_log"] = legacy["trade_log"]
+                if payload.get("equity_curve_json") is None and legacy["equity_curve"] is not None:
+                    payload["equity_curve_json"] = legacy["equity_curve"]
         return JSONResponse({"data": payload})
 
-    class BacktestRequest(BaseModel):
-        symbol: str
-        timeframe: str
-        strategy: str
-        limit: int = 2000
-        signal_window: int = 300
-        initial_capital: float = 10000.0
-        fee_rate: float = 0.0005
-        name: Optional[str] = None
+    @app.get("/api/data-health/coverage", response_class=JSONResponse)
+    def api_data_health_coverage(symbol: str) -> JSONResponse:
+        rows = coverage_summary(symbol)
+        return JSONResponse(
+            {
+                "symbol": symbol,
+                "timeframes": [
+                    {
+                        "timeframe": row.timeframe,
+                        "start_ts": row.start_ts,
+                        "end_ts": row.end_ts,
+                        "bars": row.bars,
+                        "expected_bars_estimate": row.expected_bars_estimate,
+                        "missing_bars_estimate": row.missing_bars_estimate,
+                        "last_updated_at": row.last_updated_at,
+                    }
+                    for row in rows
+                ],
+            }
+        )
+
+    @app.get("/api/data-health/integrity-events", response_class=JSONResponse)
+    def api_data_health_events(
+        symbol: str,
+        timeframe: str = "",
+        limit: int = Query(200, ge=1, le=1000),
+    ) -> JSONResponse:
+        with _connect(db_path) as conn:
+            clause = "WHERE symbol = ?"
+            params: list = [symbol]
+            if timeframe:
+                clause += " AND timeframe = ?"
+                params.append(timeframe)
+            rows = conn.execute(
+                f"""
+                SELECT *
+                FROM candle_integrity_events
+                {clause}
+                ORDER BY detected_at DESC
+                LIMIT ?
+                """,
+                (*params, limit),
+            ).fetchall()
+        return JSONResponse({"data": [dict(row) for row in rows]})
+
+    @app.post("/api/data-health/scan", response_class=JSONResponse)
+    def api_data_health_scan(payload: ScanRequest = Body(...)) -> JSONResponse:
+        _require_write_enabled()
+        summary = scan_integrity(
+            symbol=payload.symbol,
+            timeframes=payload.timeframes,
+            range_start_ts=payload.range_start_ts,
+            range_end_ts=payload.range_end_ts,
+        )
+        return JSONResponse({"data": summary})
+
+    @app.post("/api/data-health/repair", response_class=JSONResponse)
+    def api_data_health_repair(payload: RepairRequest = Body(...)) -> JSONResponse:
+        _require_write_enabled()
+        result = repair_candles(
+            symbol=payload.symbol,
+            timeframe=payload.timeframe,
+            range_start_ts=payload.range_start_ts,
+            range_end_ts=payload.range_end_ts,
+            mode=payload.mode,
+        )
+        return JSONResponse({"data": result})
+
+    @app.get("/api/data-health/repair-jobs", response_class=JSONResponse)
+    def api_data_health_repair_jobs(
+        symbol: str = "",
+        timeframe: str = "",
+        limit: int = Query(200, ge=1, le=1000),
+    ) -> JSONResponse:
+        with _connect(db_path) as conn:
+            clauses = []
+            params: list = []
+            if symbol:
+                clauses.append("symbol = ?")
+                params.append(symbol)
+            if timeframe:
+                clauses.append("timeframe = ?")
+                params.append(timeframe)
+            where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+            rows = conn.execute(
+                f"""
+                SELECT *
+                FROM candle_repair_jobs
+                {where}
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (*params, limit),
+            ).fetchall()
+        return JSONResponse({"data": [dict(row) for row in rows]})
 
     @app.post("/api/backtest/run", response_class=JSONResponse)
     def api_backtest_run(payload: BacktestRequest = Body(...)) -> JSONResponse:

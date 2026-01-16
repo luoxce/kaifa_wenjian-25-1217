@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import time
 from typing import Dict, Iterable, Optional, Tuple
 
@@ -13,6 +15,8 @@ from alpha_arena.models.enums import OrderSide, OrderStatus, OrderType
 from alpha_arena.models.order import Order
 from alpha_arena.utils.time import utc_now_ms, utc_now_s
 
+
+logger = logging.getLogger(__name__)
 
 def _safe_float(value: object) -> Optional[float]:
     if value is None:
@@ -43,6 +47,8 @@ class OKXOrderExecutor(BaseOrderExecutor):
         self.latency_ms = latency_ms
         self._orders: Dict[str, Order] = {}
         self._exchange_ids: Dict[str, str] = {}
+        self._balance_snapshot_columns: Optional[set[str]] = None
+        self._position_snapshot_columns: Optional[set[str]] = None
 
     def create_order(
         self,
@@ -98,12 +104,22 @@ class OKXOrderExecutor(BaseOrderExecutor):
             return self._orders.get(order.order_id, order)
         exchange_id = response.get("id")
 
-        order = self._transition(order, OrderStatus.NEW, "exchange accepted")
+        order = self._transition(
+            order,
+            OrderStatus.NEW,
+            "exchange accepted",
+            response=response,
+        )
         self._persist_order(order, is_new=False, exchange_order_id=exchange_id)
 
         mapped_status = self._map_status(response, order)
         if mapped_status != order.status:
-            order = self._transition(order, mapped_status, "exchange status update")
+            order = self._transition(
+                order,
+                mapped_status,
+                "exchange status update",
+                response=response,
+            )
             self._persist_order(order, is_new=False, exchange_order_id=exchange_id)
 
         self._orders[order.order_id] = order
@@ -147,7 +163,7 @@ class OKXOrderExecutor(BaseOrderExecutor):
 
         new_status = self._map_status(response, order)
         if new_status != order.status:
-            order = self._transition(order, new_status, "exchange refresh")
+            order = self._transition(order, new_status, "exchange refresh", response=response)
             self._orders[order.order_id] = order
 
         if new_status == OrderStatus.FILLED:
@@ -197,10 +213,41 @@ class OKXOrderExecutor(BaseOrderExecutor):
             return OrderStatus.FILLED
         return OrderStatus.NEW
 
-    def _transition(self, order: Order, status: OrderStatus, message: str) -> Order:
+    def _transition(
+        self,
+        order: Order,
+        status: OrderStatus,
+        message: str,
+        response: Optional[dict] = None,
+    ) -> Order:
         updated = order.with_status(status)
         self._persist_order(updated, is_new=False)
-        self.lifecycle_manager.record_event(order.order_id, order.status, status, message)
+        payload = json.dumps(response, ensure_ascii=True) if response else None
+        exchange_status = response.get("status") if response else None
+        exchange_ts = response.get("timestamp") if response else None
+        trade_id = response.get("tradeId") if response else None
+        fee = None
+        fee_currency = None
+        if response and isinstance(response.get("fee"), dict):
+            fee = response["fee"].get("cost")
+            fee_currency = response["fee"].get("currency")
+        self.lifecycle_manager.record_event(
+            order.order_id,
+            order.status,
+            status,
+            message,
+            exchange="okx",
+            symbol=order.symbol,
+            exchange_status=exchange_status,
+            exchange_event_ts=exchange_ts,
+            raw_payload=payload,
+            client_order_id=order.order_id,
+            trade_id=trade_id,
+            fill_qty=response.get("filled") if response else None,
+            fill_price=response.get("average") if response else None,
+            fee=fee,
+            fee_currency=fee_currency,
+        )
         return updated
 
     def _build_params(self, side: OrderSide) -> Dict[str, str]:
@@ -236,7 +283,12 @@ class OKXOrderExecutor(BaseOrderExecutor):
         except Exception as exc:
             message = str(exc)
             if settings.okx_default_market != "swap" or "posSide" not in message:
-                rejected = self._transition(order, OrderStatus.REJECTED, f"exchange error: {message}")
+                rejected = self._transition(
+                    order,
+                    OrderStatus.REJECTED,
+                    f"exchange error: {message}",
+                    response={"error": message},
+                )
                 self._orders[order.order_id] = rejected
                 return None, params
 
@@ -260,6 +312,7 @@ class OKXOrderExecutor(BaseOrderExecutor):
                     order,
                     OrderStatus.REJECTED,
                     f"exchange error: {retry_exc}",
+                    response={"error": str(retry_exc)},
                 )
                 self._orders[order.order_id] = rejected
                 return None, params
@@ -347,6 +400,9 @@ class OKXOrderExecutor(BaseOrderExecutor):
         frees = balance.get("free") or {}
         used = balance.get("used") or {}
         with get_connection() as conn:
+            if self._balance_snapshot_columns is None:
+                rows = conn.execute("PRAGMA table_info(balance_snapshots)").fetchall()
+                self._balance_snapshot_columns = {row["name"] for row in rows}
             for currency, total in totals.items():
                 total_value = _safe_float(total)
                 if total_value is None:
@@ -365,6 +421,57 @@ class OKXOrderExecutor(BaseOrderExecutor):
                         _safe_float(used.get(currency)),
                     ),
                 )
+                price_usdt = self._price_usdt_for_currency(conn, currency)
+                if self._balance_snapshot_columns:
+                    fields = [
+                        "timestamp",
+                        "exchange",
+                        "account_id",
+                        "currency",
+                        "total",
+                        "available",
+                        "used",
+                        "price_usdt",
+                        "total_usdt",
+                        "available_usdt",
+                        "used_usdt",
+                        "raw_payload",
+                    ]
+                    values = [
+                        int(timestamp),
+                        "okx",
+                        self._account_id(),
+                        currency,
+                        total_value,
+                        _safe_float(frees.get(currency)),
+                        _safe_float(used.get(currency)),
+                        price_usdt,
+                        total_value * price_usdt if price_usdt else None,
+                        _safe_float(frees.get(currency)) * price_usdt
+                        if price_usdt and _safe_float(frees.get(currency)) is not None
+                        else None,
+                        _safe_float(used.get(currency)) * price_usdt
+                        if price_usdt and _safe_float(used.get(currency)) is not None
+                        else None,
+                        json.dumps(
+                            {
+                                "currency": currency,
+                                "total": total_value,
+                                "free": _safe_float(frees.get(currency)),
+                                "used": _safe_float(used.get(currency)),
+                                "timestamp": int(timestamp),
+                            },
+                            ensure_ascii=True,
+                        ),
+                    ]
+                    if self._balance_snapshot_columns.issuperset(fields):
+                        conn.execute(
+                            f"""
+                            INSERT INTO balance_snapshots ({", ".join(fields)})
+                            VALUES ({", ".join("?" for _ in fields)})
+                            """,
+                            tuple(values),
+                        )
             conn.commit()
 
     def _sync_positions(self, symbols: Optional[Iterable[str]] = None) -> None:
@@ -449,6 +556,9 @@ class OKXOrderExecutor(BaseOrderExecutor):
             active_keys.add((symbol, side))
 
         with get_connection() as conn:
+            if self._position_snapshot_columns is None:
+                rows = conn.execute("PRAGMA table_info(position_snapshots)").fetchall()
+                self._position_snapshot_columns = {row["name"] for row in rows}
             if symbol_list:
                 placeholders = ",".join("?" for _ in symbol_list)
                 existing_rows = conn.execute(
@@ -464,36 +574,99 @@ class OKXOrderExecutor(BaseOrderExecutor):
                 key = (row["symbol"], row["side"])
                 if key in active_keys:
                     continue
-                conn.execute(
-                    """
-                    INSERT INTO position_snapshots (
-                        symbol,
-                        timestamp,
-                        side,
-                        size,
-                        entry_price,
-                        mark_price,
-                        unrealized_pnl,
-                        leverage,
-                        margin,
-                        liquidation_price
+                if self._position_snapshot_columns and {
+                    "exchange",
+                    "account_id",
+                    "qty",
+                    "notional_usdt",
+                    "unrealized_pnl_usdt",
+                    "margin_usdt",
+                    "raw_payload",
+                }.issubset(self._position_snapshot_columns):
+                    conn.execute(
+                        """
+                        INSERT INTO position_snapshots (
+                            symbol,
+                            timestamp,
+                            side,
+                            size,
+                            entry_price,
+                            mark_price,
+                            unrealized_pnl,
+                            leverage,
+                            margin,
+                            liquidation_price,
+                            exchange,
+                            account_id,
+                            qty,
+                            notional_usdt,
+                            unrealized_pnl_usdt,
+                            margin_usdt,
+                            raw_payload
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(symbol, timestamp, side) DO NOTHING
+                        """,
+                        (
+                            row["symbol"],
+                            int(now_ms),
+                            row["side"],
+                            0.0,
+                            float(row["entry_price"]) if row["entry_price"] is not None else 0.0,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            "okx",
+                            self._account_id(),
+                            0.0,
+                            None,
+                            None,
+                            None,
+                            json.dumps(
+                                {
+                                    "symbol": row["symbol"],
+                                    "side": row["side"],
+                                    "size": 0.0,
+                                    "entry_price": row["entry_price"],
+                                    "closed": True,
+                                },
+                                ensure_ascii=True,
+                            ),
+                        ),
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(symbol, timestamp, side) DO NOTHING
-                    """,
-                    (
-                        row["symbol"],
-                        int(now_ms),
-                        row["side"],
-                        0.0,
-                        float(row["entry_price"]) if row["entry_price"] is not None else 0.0,
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                    ),
-                )
+                else:
+                    conn.execute(
+                        """
+                        INSERT INTO position_snapshots (
+                            symbol,
+                            timestamp,
+                            side,
+                            size,
+                            entry_price,
+                            mark_price,
+                            unrealized_pnl,
+                            leverage,
+                            margin,
+                            liquidation_price
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(symbol, timestamp, side) DO NOTHING
+                        """,
+                        (
+                            row["symbol"],
+                            int(now_ms),
+                            row["side"],
+                            0.0,
+                            float(row["entry_price"]) if row["entry_price"] is not None else 0.0,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                        ),
+                    )
 
             if symbol_list:
                 placeholders = ",".join("?" for _ in symbol_list)
@@ -533,37 +706,137 @@ class OKXOrderExecutor(BaseOrderExecutor):
                     ),
                 )
 
-                conn.execute(
-                    """
-                    INSERT INTO position_snapshots (
-                        symbol,
-                        timestamp,
-                        side,
-                        size,
-                        entry_price,
-                        mark_price,
-                        unrealized_pnl,
-                        leverage,
-                        margin,
-                        liquidation_price
+                if self._position_snapshot_columns and {
+                    "exchange",
+                    "account_id",
+                    "qty",
+                    "notional_usdt",
+                    "unrealized_pnl_usdt",
+                    "margin_usdt",
+                    "raw_payload",
+                }.issubset(self._position_snapshot_columns):
+                    notional = None
+                    if pos["mark_price"] is not None:
+                        notional = abs(pos["size"]) * float(pos["mark_price"])
+                    conn.execute(
+                        """
+                        INSERT INTO position_snapshots (
+                            symbol,
+                            timestamp,
+                            side,
+                            size,
+                            entry_price,
+                            mark_price,
+                            unrealized_pnl,
+                            leverage,
+                            margin,
+                            liquidation_price,
+                            exchange,
+                            account_id,
+                            qty,
+                            notional_usdt,
+                            unrealized_pnl_usdt,
+                            margin_usdt,
+                            raw_payload
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(symbol, timestamp, side) DO NOTHING
+                        """,
+                        (
+                            pos["symbol"],
+                            int(now_ms),
+                            pos["side"],
+                            abs(pos["size"]),
+                            float(pos["entry_price"]),
+                            pos["mark_price"],
+                            pos["unrealized"],
+                            pos["leverage"],
+                            pos["margin"],
+                            pos["liquidation"],
+                            "okx",
+                            self._account_id(),
+                            abs(pos["size"]),
+                            notional,
+                            pos["unrealized"],
+                            pos["margin"],
+                            json.dumps(pos, ensure_ascii=True),
+                        ),
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(symbol, timestamp, side) DO NOTHING
-                    """,
-                    (
-                        pos["symbol"],
-                        int(now_ms),
-                        pos["side"],
-                        abs(pos["size"]),
-                        float(pos["entry_price"]),
-                        pos["mark_price"],
-                        pos["unrealized"],
-                        pos["leverage"],
-                        pos["margin"],
-                        pos["liquidation"],
-                    ),
-                )
+                else:
+                    conn.execute(
+                        """
+                        INSERT INTO position_snapshots (
+                            symbol,
+                            timestamp,
+                            side,
+                            size,
+                            entry_price,
+                            mark_price,
+                            unrealized_pnl,
+                            leverage,
+                            margin,
+                            liquidation_price
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(symbol, timestamp, side) DO NOTHING
+                        """,
+                        (
+                            pos["symbol"],
+                            int(now_ms),
+                            pos["side"],
+                            abs(pos["size"]),
+                            float(pos["entry_price"]),
+                            pos["mark_price"],
+                            pos["unrealized"],
+                            pos["leverage"],
+                            pos["margin"],
+                            pos["liquidation"],
+                        ),
+                    )
             conn.commit()
+
+    def _account_id(self) -> str:
+        key = settings.okx_api_key or ""
+        return f"okx-{key[-6:]}" if key else "okx-default"
+
+    def _price_usdt_for_currency(self, conn, currency: str) -> Optional[float]:
+        if currency.upper() == "USDT":
+            return 1.0
+        symbol_variants = [
+            f"{currency}/USDT:USDT",
+            f"{currency}/USDT",
+        ]
+        for symbol in symbol_variants:
+            row = conn.execute(
+                """
+                SELECT last_price, mark_price, index_price
+                FROM price_snapshots
+                WHERE symbol = ?
+                ORDER BY timestamp DESC
+                LIMIT 1
+                """,
+                (symbol,),
+            ).fetchone()
+            if row:
+                for field in ("mark_price", "last_price", "index_price"):
+                    value = row[field]
+                    if value is not None:
+                        return float(value)
+
+            row = conn.execute(
+                """
+                SELECT close
+                FROM market_data
+                WHERE symbol = ? AND timeframe = ?
+                ORDER BY timestamp DESC
+                LIMIT 1
+                """,
+                (symbol, "1h"),
+            ).fetchone()
+            if row and row["close"] is not None:
+                return float(row["close"])
+        logger.warning("Missing price_usdt for currency=%s", currency)
+        return None
 
     def _persist_order(
         self,

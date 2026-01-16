@@ -20,9 +20,21 @@ export default function HeaderBar({ health, onHalt }: HeaderBarProps) {
 
   return (
     <header className="flex h-12 items-center justify-between rounded-lg border border-[#27272a] bg-[#0a0a0a]/80 px-4">
-      <div className="flex items-center gap-3 font-mono text-sm tracking-[0.2em] text-slate-200">
+      <div className="flex items-center gap-4 font-mono text-sm tracking-[0.2em] text-slate-200">
         <span className="text-xs text-slate-500">QUANT</span>
         <span className="text-slate-100">TERMINAL</span>
+        <a
+          href="/backtest"
+          className="text-[10px] text-slate-500 transition hover:text-[#00ff9d]"
+        >
+          BACKTEST
+        </a>
+        <a
+          href="/data-monitor"
+          className="text-[10px] text-slate-500 transition hover:text-[#00ff9d]"
+        >
+          DATA MONITOR
+        </a>
       </div>
       <div className="flex items-center gap-3 text-xs text-slate-300">
         <StatusPill

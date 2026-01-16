@@ -1,16 +1,17 @@
 import DashboardLayout from "@/components/dashboard/DashboardLayout";
-import { useMarketData } from "@/hooks/useMarketData";
+import BacktestWorkspace from "@/pages/backtest/BacktestWorkspace";
+import DataMonitor from "@/pages/DataMonitor";
 
 export default function App() {
-  const { data, isLoading } = useMarketData();
+  const path = window.location.pathname;
 
-  if (isLoading || !data) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-[#050505] text-slate-400">
-        Loading dashboard...
-      </div>
-    );
+  if (path.startsWith("/backtest")) {
+    return <BacktestWorkspace />;
   }
 
-  return <DashboardLayout data={data} />;
+  if (path.startsWith("/data-monitor") || path.startsWith("/admin/data")) {
+    return <DataMonitor />;
+  }
+
+  return <DashboardLayout />;
 }
