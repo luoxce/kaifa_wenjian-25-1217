@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import logging
+import os
 from pathlib import Path
 import sys
 from typing import List
@@ -10,6 +12,7 @@ from typing import List
 sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
 
 from alpha_arena.config import settings
+from alpha_arena.data import DataService
 from alpha_arena.db.connection import get_connection
 from alpha_arena.decision import PortfolioDecisionEngine
 from alpha_arena.execution import PortfolioAllocator
@@ -17,6 +20,17 @@ from alpha_arena.execution.okx_executor import OKXOrderExecutor
 from alpha_arena.execution.simulated_executor import SimulatedOrderExecutor
 from alpha_arena.models.order import Order
 from alpha_arena.risk import RiskManager
+
+logger = logging.getLogger(__name__)
+
+# ===== RL集成修改开始 =====
+try:
+    from alpha_arena.rl.rl_integration import RLDecisionMaker
+
+    RL_AVAILABLE = True
+except ImportError:
+    RL_AVAILABLE = False
+# ===== RL集成修改结束 =====
 
 
 def parse_args() -> argparse.Namespace:
@@ -54,6 +68,9 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Compute orders but do not send to executor.",
     )
+    # ===== RL集成修改开始 =====
+    parser.add_argument("--use-rl", action="store_true", help="Enable RL enhancement.")
+    # ===== RL集成修改结束 =====
     return parser.parse_args()
 
 
@@ -92,13 +109,49 @@ def load_positions(symbol: str) -> List[dict]:
 
 def main() -> None:
     args = parse_args()
+    data_service = DataService()
+    # ===== RL集成修改开始 =====
+    rl_decision_maker = None
+    if (
+        args.use_rl
+        and RL_AVAILABLE
+        and os.getenv("RL_ENABLED", "false").lower() == "true"
+    ):
+        model_path = os.getenv(
+            "RL_MODEL_PATH", "models/rl/best_model/best_model.zip"
+        )
+        if os.path.exists(model_path):
+            rl_decision_maker = RLDecisionMaker(
+                model_path=model_path,
+                data_service=data_service,
+                symbol=args.symbol,
+                timeframe=args.timeframe,
+            )
+            logger.info("RL enhancement enabled.")
+        else:
+            logger.warning("RL model not found: %s", model_path)
+    # ===== RL集成修改结束 =====
     decision_engine = PortfolioDecisionEngine()
     decision = decision_engine.decide(args.symbol, args.timeframe, limit=args.limit)
     if not decision:
         print("Decision: HOLD (no allocation)")
         return
 
-    decisions = {item["strategy_id"]: item["weight"] for item in decision["allocations"]}
+    # ===== RL集成修改开始 =====
+    portfolio_decision = decision
+    if rl_decision_maker is not None:
+        final_decision = rl_decision_maker.integrate_with_portfolio_decision(
+            portfolio_decision,
+            confidence_threshold=float(
+                os.getenv("RL_CONFIDENCE_THRESHOLD", "0.7")
+            ),
+        )
+        logger.info("RL adjusted: %s", final_decision.get("rl_adjusted", False))
+    else:
+        final_decision = portfolio_decision
+    # ===== RL集成修改结束 =====
+
+    decisions = {item["strategy_id"]: item["weight"] for item in final_decision["allocations"]}
     total_equity = load_total_equity(args.equity)
     if total_equity <= 0:
         print("Total equity not available; set --equity or record balances.")

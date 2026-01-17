@@ -158,6 +158,7 @@ export default function PriceChart({ candles, orders, overlays }: PriceChartProp
         text: `${side} ${order.price?.toFixed?.(2) ?? ""}`,
       };
     });
+    markers.sort((a, b) => a.time - b.time);
     seriesRef.current.setMarkers(markers);
 
     if (!candles.length) return;

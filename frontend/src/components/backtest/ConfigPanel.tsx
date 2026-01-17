@@ -35,6 +35,8 @@ interface ConfigPanelProps {
   limitNote?: string | null;
   running?: boolean;
   apiEnabled: boolean;
+  writeEnabled?: boolean;
+  errorMessage?: string | null;
 }
 
 export default function ConfigPanel({
@@ -50,6 +52,8 @@ export default function ConfigPanel({
   limitNote,
   running,
   apiEnabled,
+  writeEnabled = true,
+  errorMessage,
 }: ConfigPanelProps) {
   const update = (key: keyof BacktestFormState, nextValue: string | number | boolean) => {
     onChange({ ...value, [key]: nextValue });
@@ -78,6 +82,16 @@ export default function ConfigPanel({
         {!apiEnabled && (
           <div className="rounded border border-rose-500/30 bg-rose-500/10 p-2 text-[11px] text-rose-300">
             API 未配置 / API not configured. 请设置 VITE_API_BASE_URL。
+          </div>
+        )}
+        {apiEnabled && !writeEnabled && (
+          <div className="rounded border border-amber-500/30 bg-amber-500/10 p-2 text-[11px] text-amber-200">
+            写接口关闭 / Writes disabled. 请设置 API_WRITE_ENABLED=true。
+          </div>
+        )}
+        {errorMessage && (
+          <div className="rounded border border-rose-500/30 bg-rose-500/10 p-2 text-[11px] text-rose-300">
+            {errorMessage}
           </div>
         )}
 

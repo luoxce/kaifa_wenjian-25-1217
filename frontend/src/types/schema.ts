@@ -3,6 +3,11 @@ export interface SystemHealth {
   latency_ms: number;
   last_sync_time: number;
   trading_enabled: boolean;
+  api_write_enabled?: boolean;
+  okx_is_demo?: boolean;
+  okx_td_mode?: string;
+  okx_default_symbol?: string;
+  okx_default_market?: string;
 }
 
 export interface AccountBalance {
@@ -35,6 +40,16 @@ export interface Order {
   status: "NEW" | "PARTIALLY_FILLED" | "FILLED" | "CANCELED" | "REJECTED";
   price: number;
   filled_amount: number;
+  timestamp: number;
+}
+
+export interface Trade {
+  trade_id?: string;
+  symbol: string;
+  side: "BUY" | "SELL" | string;
+  price: number;
+  amount: number;
+  fee?: number;
   timestamp: number;
 }
 

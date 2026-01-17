@@ -5,6 +5,7 @@ import type {
   Candle,
   Order,
   Position,
+  Trade,
   StrategyDecision,
   SystemHealth,
 } from "@/types/schema";
@@ -16,6 +17,7 @@ export interface MarketDataSnapshot {
   orders: Order[];
   positions: Position[];
   decisions: StrategyDecision[];
+  trades: Trade[];
 }
 
 export interface MarketDataOptions {
@@ -81,6 +83,9 @@ const mockSnapshot = (
         latency_ms: Math.round(rand(40, 120)),
         last_sync_time: Date.now(),
         trading_enabled: true,
+        api_write_enabled: true,
+        okx_is_demo: true,
+        okx_default_symbol: symbol,
       },
       account: {
         total_equity: 10234.5,
@@ -120,6 +125,17 @@ const mockSnapshot = (
           entry_price: last.close - 320,
           mark_price: last.close,
           unrealized_pnl: 42.6,
+        },
+      ],
+      trades: [
+        {
+          trade_id: "trade-301",
+          symbol,
+          side: "BUY",
+          price: last.close - 80,
+          amount: 0.01,
+          fee: 0.02,
+          timestamp: last.time - 600,
         },
       ],
       decisions: [
@@ -178,6 +194,9 @@ const fetchSnapshot = async (
     const positions = await fetch(
       `${apiBase}/api/positions?symbol=${encodeURIComponent(symbol)}`
     ).then((r) => r.json());
+    const trades = await fetch(
+      `${apiBase}/api/trades?symbol=${encodeURIComponent(symbol)}&limit=50`
+    ).then((r) => r.json());
 
     return {
       health,
@@ -186,6 +205,7 @@ const fetchSnapshot = async (
       orders: orders?.data || [],
       positions: positions?.data || [],
       decisions: decisions?.data || [],
+      trades: trades?.data || [],
     };
   } catch (error) {
     return mockSnapshot(symbol, timeframe, limit);

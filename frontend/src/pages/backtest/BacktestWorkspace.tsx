@@ -10,7 +10,7 @@ import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/componen
 import { useBacktestRuns } from "@/hooks/useBacktestRuns";
 import { useSocket } from "@/hooks/useSocket";
 import { buildDetails, buildSummary, parseEquityCurve, parseTrades } from "@/lib/backtestMetrics";
-import type { BacktestRun, Candle } from "@/types/schema";
+import type { BacktestRun, Candle, SystemHealth } from "@/types/schema";
 
 const apiBase = import.meta.env.VITE_API_BASE_URL as string | undefined;
 const wsBase = import.meta.env.VITE_WS_BASE_URL as string | undefined;
@@ -77,15 +77,28 @@ const presets = [
 
 const fetchJson = async (url: string, init?: RequestInit) => {
   const res = await fetch(url, init);
-  if (!res.ok) {
-    throw new Error(`Request failed: ${res.status}`);
+  const text = await res.text();
+  let data: any = {};
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = {};
+    }
   }
-  return res.json();
+  if (!res.ok) {
+    const detail =
+      (data && (data.detail || data.message || data.error)) ??
+      `Request failed: ${res.status}`;
+    throw new Error(detail);
+  }
+  return data;
 };
 
 export default function BacktestWorkspace() {
   const [form, setForm] = useState<BacktestFormState>(defaultForm);
   const [runStatus, setRunStatus] = useState<RunStatus>("idle");
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const { runs, selectedRun, comparedRuns, addRun, removeRun, selectRun, toggleCompare } =
     useBacktestRuns();
   const { status: wsStatus } = useSocket(wsBase ? `${wsBase}/ws/market` : undefined);
@@ -101,6 +114,15 @@ export default function BacktestWorkspace() {
     queryFn: () => fetchJson(`${apiBase}/api/backtests?limit=30`).then((res) => res.data || []),
     enabled: Boolean(apiBase),
   });
+
+  const { data: apiHealth } = useQuery<SystemHealth>({
+    queryKey: ["api-health"],
+    queryFn: () => fetchJson(`${apiBase}/api/health`),
+    enabled: Boolean(apiBase),
+    refetchInterval: 15000,
+  });
+
+  const writeEnabled = apiHealth?.api_write_enabled ?? true;
 
   const { data: coverageRows = [] } = useQuery<
     Array<{
@@ -210,6 +232,8 @@ export default function BacktestWorkspace() {
 
   const mutation = useMutation({
     mutationFn: async () => {
+      const startTs = toMs(form.startTime);
+      const endTs = toMs(form.endTime);
       const payload = {
         symbol: form.symbol,
         timeframe: form.timeframe,
@@ -219,6 +243,20 @@ export default function BacktestWorkspace() {
         initial_capital: form.initialCapital,
         fee_rate: form.feeRate,
         name: form.name || null,
+        start_ts: startTs,
+        end_ts: endTs,
+        slippage_bps: form.slippageBps,
+        slippage_model: form.slippageModel,
+        order_size_mode: form.orderSizeMode,
+        order_size_value: form.orderSizeValue,
+        allow_short: form.allowShort,
+        funding_enabled: form.fundingEnabled,
+        leverage: form.leverage ?? 1,
+        risk: {
+          max_drawdown: form.risk.maxDrawdown,
+          max_position: form.risk.maxPosition,
+        },
+        strategy_params: form.strategyParams,
       };
       const response = await fetchJson(`${apiBase}/api/backtest/run`, {
         method: "POST",
@@ -236,9 +274,11 @@ export default function BacktestWorkspace() {
       const newRun = mapRun(detail, form, candles, run?.metrics);
       addRun(newRun);
       setRunStatus("done");
+      setErrorMessage(null);
     },
-    onError: () => {
+    onError: (error) => {
       setRunStatus("error");
+      setErrorMessage(error instanceof Error ? error.message : "Backtest failed.");
     },
   });
 
@@ -263,7 +303,7 @@ export default function BacktestWorkspace() {
         status={runStatus}
         wsStatus={wsStatus === "open" ? "open" : wsStatus === "connecting" ? "connecting" : "closed"}
         onRun={() => mutation.mutate()}
-        disabled={!apiBase || mutation.isPending}
+        disabled={!apiBase || mutation.isPending || !writeEnabled}
       />
 
       <ResizablePanelGroup
@@ -284,6 +324,8 @@ export default function BacktestWorkspace() {
               limitNote={limitNote}
               running={mutation.isPending}
               apiEnabled={Boolean(apiBase)}
+              writeEnabled={writeEnabled}
+              errorMessage={errorMessage}
               onReset={() => setForm(defaultForm)}
             />
           </div>
@@ -377,11 +419,76 @@ export default function BacktestWorkspace() {
     if (!apiBase) return;
     const detail = await fetchJson(`${apiBase}/api/backtests/${row.backtest_id}`);
     const payload = detail.data as Record<string, unknown>;
+    const paramsPayload = safeJson<Record<string, any>>(
+      payload.params_json ?? payload.strategy_params ?? {},
+      {}
+    );
+    const execution = (paramsPayload.execution ?? {}) as Record<string, unknown>;
+    const riskPayload = (paramsPayload.risk ?? {}) as Record<string, unknown>;
+    const rangePayload = (paramsPayload.range ?? {}) as Record<string, unknown>;
+    const strategyFromParams =
+      typeof paramsPayload.strategy_key === "string" && paramsPayload.strategy_key
+        ? paramsPayload.strategy_key
+        : undefined;
+    const strategyParamsPayload = paramsPayload.strategy_params;
+    const strategyParams =
+      strategyParamsPayload &&
+      typeof strategyParamsPayload === "object" &&
+      !Array.isArray(strategyParamsPayload)
+        ? (strategyParamsPayload as Record<string, unknown>)
+        : form.strategyParams;
+    const rangeStart = normalizeTs(
+      rangePayload.requested_start_ts ??
+        rangePayload.requestedStartTs ??
+        rangePayload.start_ts ??
+        payload.start_ts ??
+        payload.start_time ??
+        payload.startTime
+    );
+    const rangeEnd = normalizeTs(
+      rangePayload.requested_end_ts ??
+        rangePayload.requestedEndTs ??
+        rangePayload.end_ts ??
+        payload.end_ts ??
+        payload.end_time ??
+        payload.endTime
+    );
     const nextForm: BacktestFormState = {
       ...form,
-      symbol: String(payload.symbol ?? row.symbol ?? form.symbol),
-      timeframe: String(payload.timeframe ?? row.timeframe ?? form.timeframe),
-      name: String(payload.name ?? row.name ?? form.name ?? ""),
+      symbol: readString(payload.symbol ?? row.symbol, form.symbol),
+      timeframe: readString(payload.timeframe ?? row.timeframe, form.timeframe),
+      strategy: readString(payload.strategy ?? strategyFromParams, form.strategy),
+      name: readText(payload.name ?? row.name, form.name ?? ""),
+      initialCapital:
+        readNumber(payload.initial_capital, form.initialCapital),
+      feeRate: readNumber(execution.fee_rate, form.feeRate),
+      slippageBps: readNumber(execution.slippage_bps, form.slippageBps),
+      slippageModel: readString(execution.slippage_model, form.slippageModel),
+      orderSizeMode: readString(execution.order_size_mode, form.orderSizeMode),
+      orderSizeValue:
+        readNumber(execution.order_size_value, form.orderSizeValue),
+      allowShort: readBool(execution.allow_short, form.allowShort),
+      fundingEnabled: readBool(execution.funding_enabled, form.fundingEnabled),
+      leverage: readNumber(execution.leverage, form.leverage ?? 1),
+      risk: {
+        maxDrawdown:
+          readNumber(
+            riskPayload.max_drawdown ?? riskPayload.maxDrawdown,
+            form.risk.maxDrawdown ?? 0
+          ),
+        maxPosition:
+          readNumber(
+            riskPayload.max_position ?? riskPayload.maxPosition,
+            form.risk.maxPosition ?? 0
+          ),
+      },
+      startTime: rangeStart ? new Date(rangeStart).toISOString() : form.startTime,
+      endTime: rangeEnd ? new Date(rangeEnd).toISOString() : form.endTime,
+      signalWindow: readNumber(
+        paramsPayload.signal_window ?? payload.signal_window,
+        form.signalWindow
+      ),
+      strategyParams,
     };
     setForm(nextForm);
     const candleResponse = await fetchJson(
@@ -464,6 +571,30 @@ function safeJson<T>(value: unknown, fallback: T): T {
   return value as T;
 }
 
+function readNumber(value: unknown, fallback: number): number {
+  if (value === undefined || value === null) return fallback;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function readString(value: unknown, fallback: string): string {
+  if (typeof value === "string" && value) return value;
+  return fallback;
+}
+
+function readText(value: unknown, fallback: string): string {
+  if (value === undefined || value === null) return fallback;
+  return String(value);
+}
+
+function readBool(value: unknown, fallback: boolean): boolean {
+  if (value === undefined || value === null) return fallback;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") return value.toLowerCase() === "true";
+  if (typeof value === "number") return value !== 0;
+  return fallback;
+}
+
 function downloadCsv(filename: string, headers: string[], rows: Array<Array<unknown>>) {
   const lines = [headers.join(",")];
   for (const row of rows) {
@@ -481,7 +612,15 @@ function downloadCsv(filename: string, headers: string[], rows: Array<Array<unkn
 }
 
 function normalizeTs(value: unknown): number | undefined {
-  if (!value) return undefined;
+  if (value === undefined || value === null || value === "") return undefined;
+  if (typeof value === "string") {
+    const numeric = Number(value);
+    if (Number.isFinite(numeric)) {
+      return numeric < 1e12 ? numeric * 1000 : numeric;
+    }
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
   const num = Number(value);
   if (!Number.isFinite(num)) return undefined;
   return num < 1e12 ? num * 1000 : num;

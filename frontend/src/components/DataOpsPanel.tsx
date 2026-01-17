@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 
 const apiBase = import.meta.env.VITE_API_BASE_URL as string | undefined;
@@ -13,11 +13,28 @@ const postJson = async (path: string, payload?: Record<string, unknown>) => {
   return res.json();
 };
 
-export default function DataOpsPanel() {
-  const [symbol, setSymbol] = useState("BTC/USDT:USDT");
+interface DataOpsPanelProps {
+  defaultSymbol?: string;
+  defaultTimeframes?: string[];
+}
+
+export default function DataOpsPanel({
+  defaultSymbol = "BTC/USDT:USDT",
+  defaultTimeframes = ["15m", "1h", "4h", "1d"],
+}: DataOpsPanelProps) {
+  const defaultTimeframesText = defaultTimeframes.join(",");
+  const [symbol, setSymbol] = useState(defaultSymbol);
   const [sinceDays, setSinceDays] = useState(30);
-  const [timeframes, setTimeframes] = useState("15m,1h,4h,1d");
+  const [timeframes, setTimeframes] = useState(defaultTimeframesText);
   const [lastResult, setLastResult] = useState("");
+
+  useEffect(() => {
+    setSymbol(defaultSymbol);
+  }, [defaultSymbol]);
+
+  useEffect(() => {
+    setTimeframes(defaultTimeframesText);
+  }, [defaultTimeframesText]);
 
   const syncAccount = useMutation({
     mutationFn: () => postJson("/api/actions/sync_account", { symbol }),
@@ -25,6 +42,14 @@ export default function DataOpsPanel() {
   });
   const syncOrders = useMutation({
     mutationFn: () => postJson("/api/actions/sync_orders"),
+    onSuccess: (data) => setLastResult(JSON.stringify(data)),
+  });
+  const syncOrdersFull = useMutation({
+    mutationFn: () =>
+      postJson("/api/actions/sync_orders_full", {
+        symbol,
+        since_days: Number(sinceDays),
+      }),
     onSuccess: (data) => setLastResult(JSON.stringify(data)),
   });
   const ingest = useMutation({
@@ -75,6 +100,13 @@ export default function DataOpsPanel() {
             disabled={!apiBase}
           >
             Sync Orders
+          </button>
+          <button
+            className="rounded bg-slate-800 px-3 py-1 text-[11px]"
+            onClick={() => syncOrdersFull.mutate()}
+            disabled={!apiBase}
+          >
+            Sync Orders + Trades
           </button>
         </div>
         {!apiBase && (

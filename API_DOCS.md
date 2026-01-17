@@ -9,6 +9,8 @@ Base URL: `http://127.0.0.1:8000`
 
 ## 市场数据
 - `GET /api/market/candles?symbol=BTC/USDT:USDT&timeframe=1h&limit=200`
+- `GET /api/market/symbols`
+- `GET /api/market/timeframes?symbol=BTC/USDT:USDT`
 - `GET /api/market/funding?symbol=BTC/USDT:USDT`
 - `GET /api/market/prices?symbol=BTC/USDT:USDT`
 

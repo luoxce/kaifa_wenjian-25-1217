@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Iterable, Optional
 
+from alpha_arena.config import settings
 from alpha_arena.db.connection import get_connection
 from alpha_arena.execution.lifecycle import OrderLifecycleManager
 from alpha_arena.ingest.okx import create_okx_client
@@ -27,6 +29,78 @@ def _safe_float(value: object) -> Optional[float]:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _safe_int(value: object) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_ms(value: object) -> Optional[int]:
+    ts = _safe_int(value)
+    if ts is None:
+        return None
+    return ts * 1000 if ts < 1_000_000_000_000 else ts
+
+
+def _to_s(value: object) -> Optional[int]:
+    ts = _to_ms(value)
+    return int(ts / 1000) if ts is not None else None
+
+
+def _normalize_side(value: object) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip().upper()
+    if text in {"BUY", "SELL"}:
+        return text
+    if text == "B":
+        return "BUY"
+    if text == "S":
+        return "SELL"
+    return None
+
+
+def _normalize_order_type(value: object) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if "market" in text:
+        return "MARKET"
+    if "limit" in text or text in {"post_only", "post"}:
+        return "LIMIT"
+    return None
+
+
+def _normalize_status(value: object, filled: Optional[float], amount: Optional[float]) -> str:
+    text = str(value or "").strip().lower()
+    if text in {"canceled", "cancelled"}:
+        return OrderStatus.CANCELED.value
+    if text in {"rejected"}:
+        return OrderStatus.REJECTED.value
+    if text in {"closed", "filled"}:
+        return OrderStatus.FILLED.value
+    if text in {"open", "live"}:
+        if filled is not None and amount is not None and amount > 0:
+            if filled >= amount:
+                return OrderStatus.FILLED.value
+            if filled > 0:
+                return OrderStatus.PARTIALLY_FILLED.value
+        return OrderStatus.NEW.value
+    if filled is not None and amount is not None and amount > 0:
+        if filled >= amount:
+            return OrderStatus.FILLED.value
+        if filled > 0:
+            return OrderStatus.PARTIALLY_FILLED.value
+    return OrderStatus.NEW.value
 
 
 class OrderTracker:
@@ -59,6 +133,481 @@ class OrderTracker:
             if self._apply_order_update(row, response):
                 updated += 1
         return updated
+
+    def sync_exchange_history(
+        self,
+        symbols: Optional[Iterable[str]] = None,
+        since_ms: Optional[int] = None,
+        limit: int = 100,
+        include_open: bool = True,
+        include_closed: bool = True,
+        include_trades: bool = True,
+    ) -> dict:
+        symbol_list = self._normalize_symbols(symbols)
+        results = {
+            "orders_inserted": 0,
+            "orders_updated": 0,
+            "trades_inserted": 0,
+            "symbols": {},
+        }
+        if not symbol_list:
+            return results
+
+        with get_connection() as conn:
+            for symbol in symbol_list:
+                stats = {
+                    "orders_inserted": 0,
+                    "orders_updated": 0,
+                    "trades_inserted": 0,
+                }
+                orders: list[dict] = []
+                if include_open:
+                    orders.extend(
+                        self._fetch_exchange_orders(symbol, since_ms, limit, closed=False)
+                    )
+                if include_closed:
+                    orders.extend(
+                        self._fetch_exchange_orders(symbol, since_ms, limit, closed=True)
+                    )
+
+                seen_orders: set[str] = set()
+                for order in orders:
+                    order_key = self._order_key(order)
+                    if order_key:
+                        if order_key in seen_orders:
+                            continue
+                        seen_orders.add(order_key)
+                    order_row_id, inserted, updated = self._upsert_exchange_order(
+                        conn, order
+                    )
+                    if order_row_id is None:
+                        continue
+                    if inserted:
+                        stats["orders_inserted"] += 1
+                    elif updated:
+                        stats["orders_updated"] += 1
+
+                if include_trades:
+                    trades = self._fetch_exchange_trades(symbol, since_ms, limit)
+                    seen_trades: set[str] = set()
+                    for trade in trades:
+                        trade_id = (
+                            trade.get("id")
+                            or trade.get("tradeId")
+                            or trade.get("info", {}).get("tradeId")
+                            or trade.get("info", {}).get("id")
+                        )
+                        if trade_id:
+                            trade_id = str(trade_id)
+                            if trade_id in seen_trades:
+                                continue
+                            seen_trades.add(trade_id)
+                        if self._insert_exchange_trade(conn, trade):
+                            stats["trades_inserted"] += 1
+
+                conn.commit()
+                results["symbols"][symbol] = stats
+
+        results["orders_inserted"] = sum(
+            stat["orders_inserted"] for stat in results["symbols"].values()
+        )
+        results["orders_updated"] = sum(
+            stat["orders_updated"] for stat in results["symbols"].values()
+        )
+        results["trades_inserted"] = sum(
+            stat["trades_inserted"] for stat in results["symbols"].values()
+        )
+        return results
+
+    def _normalize_symbols(self, symbols: Optional[Iterable[str]]) -> list[str]:
+        if symbols:
+            return [s.strip() for s in symbols if s and s.strip()]
+        if settings.okx_default_symbol:
+            return [settings.okx_default_symbol]
+        return []
+
+    def _fetch_exchange_orders(
+        self,
+        symbol: str,
+        since_ms: Optional[int],
+        limit: int,
+        *,
+        closed: bool,
+    ) -> list[dict]:
+        if closed:
+            if self.exchange.has.get("fetchClosedOrders"):
+                fetch_fn = lambda since: self.exchange.fetch_closed_orders(
+                    symbol, since=since, limit=limit
+                )
+            elif self.exchange.has.get("fetchOrders"):
+                fetch_fn = lambda since: self.exchange.fetch_orders(
+                    symbol, since=since, limit=limit
+                )
+            else:
+                return []
+        else:
+            if self.exchange.has.get("fetchOpenOrders"):
+                fetch_fn = lambda since: self.exchange.fetch_open_orders(
+                    symbol, since=since, limit=limit
+                )
+            elif self.exchange.has.get("fetchOrders"):
+                fetch_fn = lambda since: self.exchange.fetch_orders(
+                    symbol, since=since, limit=limit
+                )
+            else:
+                return []
+        return self._fetch_paged(fetch_fn, since_ms, limit)
+
+    def _fetch_exchange_trades(
+        self,
+        symbol: str,
+        since_ms: Optional[int],
+        limit: int,
+    ) -> list[dict]:
+        if not self.exchange.has.get("fetchMyTrades"):
+            return []
+        fetch_fn = lambda since: self.exchange.fetch_my_trades(
+            symbol, since=since, limit=limit
+        )
+        return self._fetch_paged(fetch_fn, since_ms, limit)
+
+    def _fetch_paged(
+        self,
+        fetch_fn,
+        since_ms: Optional[int],
+        limit: int,
+    ) -> list[dict]:
+        if since_ms is None:
+            try:
+                return fetch_fn(None)
+            except TypeError:
+                return fetch_fn()
+        results: list[dict] = []
+        next_since = since_ms
+        last_max = None
+        for _ in range(200):
+            batch = fetch_fn(next_since)
+            if not batch:
+                break
+            results.extend(batch)
+            timestamps = [
+                ts for ts in (self._extract_ts_ms(item) for item in batch) if ts
+            ]
+            if not timestamps:
+                break
+            max_ts = max(timestamps)
+            if last_max is not None and max_ts <= last_max:
+                break
+            last_max = max_ts
+            if len(batch) < limit:
+                break
+            next_since = max_ts + 1
+            rate_limit = getattr(self.exchange, "rateLimit", None)
+            if rate_limit:
+                time.sleep(rate_limit / 1000.0)
+        return results
+
+    def _extract_ts_ms(self, payload: dict) -> Optional[int]:
+        ts = _to_ms(payload.get("timestamp"))
+        if ts is not None:
+            return ts
+        ts = _to_ms(payload.get("lastTradeTimestamp"))
+        if ts is not None:
+            return ts
+        ts = _to_ms(payload.get("lastUpdateTimestamp"))
+        if ts is not None:
+            return ts
+        info = payload.get("info") or {}
+        for key in ("ts", "cTime", "uTime", "fillTime"):
+            ts = _to_ms(info.get(key))
+            if ts is not None:
+                return ts
+        dt = payload.get("datetime")
+        if dt and hasattr(self.exchange, "parse8601"):
+            parsed = self.exchange.parse8601(dt)
+            if parsed:
+                return _to_ms(parsed)
+        return None
+
+    def _order_key(self, order: dict) -> str:
+        exchange_id = order.get("id") or order.get("orderId")
+        if not exchange_id:
+            exchange_id = (order.get("info") or {}).get("ordId")
+        if exchange_id:
+            return f"ex:{exchange_id}"
+        client_id = order.get("clientOrderId") or order.get("client_order_id")
+        if not client_id:
+            client_id = (order.get("info") or {}).get("clOrdId")
+        return f"cl:{client_id}" if client_id else ""
+
+    def _upsert_exchange_order(
+        self, conn, order: dict
+    ) -> tuple[Optional[int], bool, bool]:
+        info = order.get("info") or {}
+        exchange_id = order.get("id") or order.get("orderId") or info.get("ordId")
+        client_id = (
+            order.get("clientOrderId")
+            or order.get("client_order_id")
+            or info.get("clOrdId")
+        )
+        symbol = order.get("symbol") or info.get("instId")
+        side = _normalize_side(order.get("side") or info.get("side"))
+        order_type = _normalize_order_type(order.get("type") or info.get("ordType"))
+        amount = _safe_float(
+            order.get("amount") or info.get("sz") or order.get("filled") or info.get("accFillSz")
+        )
+        filled = _safe_float(order.get("filled") or info.get("accFillSz"))
+        price = _safe_float(
+            order.get("price")
+            or order.get("average")
+            or info.get("avgPx")
+            or info.get("px")
+        )
+        leverage = _safe_float(order.get("leverage") or info.get("lever"))
+        time_in_force = order.get("timeInForce") or info.get("tif")
+        status = _normalize_status(order.get("status") or info.get("state"), filled, amount)
+        created_at = _to_s(
+            order.get("timestamp") or info.get("cTime") or info.get("createdAt")
+        )
+        updated_at = _to_s(
+            order.get("lastUpdateTimestamp")
+            or info.get("uTime")
+            or order.get("timestamp")
+            or info.get("cTime")
+        )
+
+        if not symbol or not (exchange_id or client_id):
+            return None, False, False
+        if client_id is None:
+            client_id = exchange_id
+        if order_type is None:
+            order_type = "MARKET" if price is None else "LIMIT"
+
+        row = None
+        if exchange_id:
+            row = conn.execute(
+                "SELECT id FROM orders WHERE exchange_order_id = ? LIMIT 1",
+                (str(exchange_id),),
+            ).fetchone()
+        if row is None and client_id:
+            row = conn.execute(
+                "SELECT id FROM orders WHERE client_order_id = ? LIMIT 1",
+                (str(client_id),),
+            ).fetchone()
+
+        if row:
+            conn.execute(
+                """
+                UPDATE orders
+                SET symbol = COALESCE(?, symbol),
+                    side = COALESCE(?, side),
+                    type = COALESCE(?, type),
+                    price = COALESCE(?, price),
+                    amount = COALESCE(?, amount),
+                    leverage = COALESCE(?, leverage),
+                    status = ?,
+                    client_order_id = COALESCE(?, client_order_id),
+                    exchange_order_id = COALESCE(?, exchange_order_id),
+                    time_in_force = COALESCE(?, time_in_force),
+                    updated_at = COALESCE(?, updated_at)
+                WHERE id = ?
+                """,
+                (
+                    symbol,
+                    side,
+                    order_type,
+                    price,
+                    amount,
+                    leverage,
+                    status,
+                    str(client_id) if client_id else None,
+                    str(exchange_id) if exchange_id else None,
+                    time_in_force,
+                    updated_at,
+                    row["id"],
+                ),
+            )
+            return int(row["id"]), False, True
+
+        if side is None or order_type is None or amount is None:
+            return None, False, False
+
+        cur = conn.execute(
+            """
+            INSERT INTO orders (
+                symbol,
+                side,
+                type,
+                price,
+                amount,
+                leverage,
+                status,
+                client_order_id,
+                exchange_order_id,
+                time_in_force,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                symbol,
+                side,
+                order_type,
+                price,
+                amount,
+                leverage,
+                status,
+                str(client_id) if client_id else None,
+                str(exchange_id) if exchange_id else None,
+                time_in_force,
+                created_at or utc_now_s(),
+                updated_at or utc_now_s(),
+            ),
+        )
+        return int(cur.lastrowid), True, False
+
+    def _insert_exchange_trade(self, conn, trade: dict) -> bool:
+        info = trade.get("info") or {}
+        exchange_order_id = trade.get("order") or trade.get("orderId") or info.get("ordId")
+        if not exchange_order_id:
+            return False
+        symbol = trade.get("symbol") or info.get("instId")
+        side = _normalize_side(trade.get("side") or info.get("side"))
+        price = _safe_float(trade.get("price") or info.get("px"))
+        amount = _safe_float(trade.get("amount") or info.get("sz"))
+        fee_info = trade.get("fee") or {}
+        fee_cost = _safe_float(fee_info.get("cost") or info.get("fee"))
+        fee_ccy = fee_info.get("currency") or info.get("feeCcy")
+        realized_pnl = _safe_float(info.get("realizedPnl") or info.get("pnl"))
+        timestamp = _to_ms(trade.get("timestamp") or info.get("ts"))
+        if timestamp is None and trade.get("datetime") and hasattr(self.exchange, "parse8601"):
+            parsed = self.exchange.parse8601(trade.get("datetime"))
+            timestamp = _to_ms(parsed)
+
+        if not symbol or side is None or price is None or amount is None or timestamp is None:
+            return False
+
+        order_row_id = self._ensure_order_row_for_trade(
+            conn,
+            exchange_order_id=str(exchange_order_id),
+            symbol=symbol,
+            side=side,
+            amount=amount,
+            price=price,
+            timestamp_ms=timestamp,
+        )
+        if order_row_id is None:
+            return False
+
+        if self._trade_exists(conn, order_row_id, timestamp, price, amount, side):
+            return False
+
+        conn.execute(
+            """
+            INSERT INTO trades (
+                order_id,
+                symbol,
+                side,
+                price,
+                amount,
+                fee,
+                fee_currency,
+                realized_pnl,
+                timestamp
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                order_row_id,
+                symbol,
+                side,
+                price,
+                amount,
+                fee_cost,
+                fee_ccy,
+                realized_pnl,
+                int(timestamp),
+            ),
+        )
+        return True
+
+    def _ensure_order_row_for_trade(
+        self,
+        conn,
+        *,
+        exchange_order_id: str,
+        symbol: str,
+        side: str,
+        amount: float,
+        price: float,
+        timestamp_ms: int,
+    ) -> Optional[int]:
+        row = conn.execute(
+            "SELECT id FROM orders WHERE exchange_order_id = ? LIMIT 1",
+            (exchange_order_id,),
+        ).fetchone()
+        if row:
+            return int(row["id"])
+        created_at = _to_s(timestamp_ms) or utc_now_s()
+        cur = conn.execute(
+            """
+            INSERT INTO orders (
+                symbol,
+                side,
+                type,
+                price,
+                amount,
+                leverage,
+                status,
+                client_order_id,
+                exchange_order_id,
+                time_in_force,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                symbol,
+                side,
+                "MARKET" if price is None else "LIMIT",
+                price,
+                amount,
+                None,
+                OrderStatus.FILLED.value,
+                exchange_order_id,
+                exchange_order_id,
+                None,
+                created_at,
+                created_at,
+            ),
+        )
+        return int(cur.lastrowid)
+
+    def _trade_exists(
+        self,
+        conn,
+        order_row_id: int,
+        timestamp_ms: int,
+        price: float,
+        amount: float,
+        side: str,
+    ) -> bool:
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM trades
+            WHERE order_id = ?
+              AND timestamp = ?
+              AND price = ?
+              AND amount = ?
+              AND side = ?
+            LIMIT 1
+            """,
+            (order_row_id, int(timestamp_ms), float(price), float(amount), side),
+        ).fetchone()
+        return row is not None
 
     def _load_order_columns(self) -> set[str]:
         with get_connection() as conn:

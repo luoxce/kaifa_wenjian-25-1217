@@ -207,6 +207,75 @@ class DataService:
         self._light_check(df)
         return df
 
+    def get_candles_range(
+        self,
+        symbol: str,
+        timeframe: str,
+        start_ts: Optional[int] = None,
+        end_ts: Optional[int] = None,
+        limit: Optional[int] = None,
+    ) -> pd.DataFrame:
+        if limit is not None and limit <= 0:
+            return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
+
+        with self._connect() as conn:
+            mapping = self._map_columns(
+                conn,
+                "market_data",
+                MARKET_DATA_MAPPING,
+                required=("timestamp", "open", "high", "low", "close"),
+            )
+            ts_col = mapping["timestamp"]
+            o_col = mapping["open"]
+            h_col = mapping["high"]
+            l_col = mapping["low"]
+            c_col = mapping["close"]
+            v_col = mapping.get("volume")
+
+            volume_expr = v_col if v_col else "NULL"
+            clauses = ["symbol = ?", "timeframe = ?"]
+            params: list = [symbol, timeframe]
+            if start_ts is not None:
+                clauses.append(f"{ts_col} >= ?")
+                params.append(int(start_ts))
+            if end_ts is not None:
+                clauses.append(f"{ts_col} <= ?")
+                params.append(int(end_ts))
+            where = " AND ".join(clauses)
+            limit_clause = " LIMIT ?" if limit is not None else ""
+            if limit is not None:
+                params.append(int(limit))
+
+            rows = conn.execute(
+                f"""
+                SELECT {ts_col} AS timestamp,
+                       {o_col} AS open,
+                       {h_col} AS high,
+                       {l_col} AS low,
+                       {c_col} AS close,
+                       {volume_expr} AS volume
+                FROM market_data
+                WHERE {where}
+                ORDER BY {ts_col} ASC
+                {limit_clause}
+                """,
+                tuple(params),
+            ).fetchall()
+
+        df = pd.DataFrame(
+            rows, columns=["timestamp", "open", "high", "low", "close", "volume"]
+        )
+        if df.empty:
+            return df
+
+        df["timestamp"] = df["timestamp"].astype("int64")
+        for col in ("open", "high", "low", "close", "volume"):
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        df["volume"] = df["volume"].fillna(0.0).astype(float)
+
+        self._light_check(df)
+        return df
+
     def get_ohlcv(self, symbol: str, timeframe: str, limit: int = 300) -> pd.DataFrame:
         """Alias for get_candles to satisfy backtest interface."""
         return self.get_candles(symbol, timeframe, limit=limit)

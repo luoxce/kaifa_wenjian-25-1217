@@ -352,9 +352,67 @@ class BacktestRecorder:
 class SimpleBacktester:
     """Minimal backtester with market-close execution."""
 
-    def __init__(self, initial_capital: float = 10000.0, fee_rate: float = 0.0005) -> None:
+    def __init__(
+        self,
+        initial_capital: float = 10000.0,
+        fee_rate: float = 0.0005,
+        slippage_bps: float = 0.0,
+        slippage_model: str = "fixed",
+        order_size_mode: str = "percentEquity",
+        order_size_value: float = 1.0,
+        allow_short: bool = True,
+        leverage: float = 1.0,
+        max_drawdown: Optional[float] = None,
+        max_position: Optional[float] = None,
+    ) -> None:
         self.initial_capital = initial_capital
         self.fee_rate = fee_rate
+        self.slippage_bps = max(slippage_bps, 0.0)
+        self.slippage_model = slippage_model
+        self.order_size_mode = order_size_mode or "percentEquity"
+        self.order_size_value = order_size_value
+        self.allow_short = allow_short
+        self.leverage = max(leverage, 1.0)
+        self.max_drawdown = max_drawdown
+        self.max_position = max_position
+
+    def _apply_slippage(self, price: float, side: str) -> float:
+        if self.slippage_model != "fixed" or self.slippage_bps <= 0:
+            return price
+        factor = 1.0 + self.slippage_bps / 10000.0
+        if side.lower() == "sell":
+            factor = 1.0 - self.slippage_bps / 10000.0
+        return price * factor
+
+    def _ratio_from_value(self, value: float) -> float:
+        if value <= 0:
+            return 0.0
+        return value / 100.0 if value > 1 else value
+
+    def _cap_notional(self, notional: float, cash: float) -> float:
+        if self.max_position is None or self.max_position <= 0:
+            return notional
+        cap = (
+            self.max_position * cash
+            if self.max_position <= 1
+            else self.max_position
+        )
+        return min(notional, cap)
+
+    def _compute_notional(self, cash: float, price: float) -> float:
+        mode = (self.order_size_mode or "").lower()
+        value = self.order_size_value or 0.0
+        if mode == "fixedqty":
+            notional = value * price
+        elif mode == "fixednotional":
+            notional = value
+        elif mode == "percentequity":
+            notional = cash * self._ratio_from_value(value)
+        else:
+            notional = cash
+        notional = self._cap_notional(notional, cash)
+        max_notional = cash * self.leverage
+        return min(max(notional, 0.0), max_notional)
 
     def run(
         self,
@@ -363,12 +421,17 @@ class SimpleBacktester:
         data_service: BacktestDataService,
         recorder: Optional[BacktestRecorder] = None,
     ) -> Dict:
+        cash = self.initial_capital
         equity = self.initial_capital
         position = 0  # 1 = long, -1 = short, 0 = flat
         entry_price: Optional[float] = None
         entry_equity: Optional[float] = None
+        entry_margin: Optional[float] = None
         entry_ts: Optional[int] = None
         position_qty: Optional[float] = None
+        position_notional: Optional[float] = None
+        entry_slippage_cost: float = 0.0
+        peak_equity = equity
 
         trade_log: List[Dict] = []
         equity_curve: List[Dict] = []
@@ -383,22 +446,28 @@ class SimpleBacktester:
                 recorder.record_decision(signal)
 
             def close_position(reason: str) -> None:
-                nonlocal equity, position, entry_price, entry_equity, entry_ts, position_qty
+                nonlocal cash, equity, position, entry_price, entry_equity, entry_margin
+                nonlocal entry_ts, position_qty, position_notional, entry_slippage_cost
                 if position == 0 or entry_price is None or entry_equity is None:
                     return
+                if position_qty is None or position_notional is None or entry_margin is None:
+                    return
+                exit_side = "sell" if position == 1 else "buy"
+                exit_price = self._apply_slippage(price, exit_side)
                 if position == 1:
-                    gross_equity = entry_equity * (price / entry_price)
+                    pnl = position_qty * (exit_price - entry_price)
                 else:
-                    gross_equity = entry_equity * (entry_price / price)
-                fee = gross_equity * self.fee_rate
-                exit_equity = gross_equity - fee
-                pnl = exit_equity - entry_equity
+                    pnl = position_qty * (entry_price - exit_price)
+                notional_exit = position_qty * exit_price
+                fee = notional_exit * self.fee_rate
+                exit_slippage = abs(exit_price - price) * position_qty
+                cash += entry_margin + pnl - fee
+                exit_equity = cash
                 if recorder is not None:
-                    side = "sell" if position == 1 else "buy"
                     recorder.record_order(
                         ts,
-                        side,
-                        price,
+                        exit_side,
+                        exit_price,
                         position_qty or 0.0,
                         fee,
                         pnl,
@@ -409,11 +478,15 @@ class SimpleBacktester:
                         "entry_ts": entry_ts,
                         "entry_price": entry_price,
                         "exit_ts": ts,
-                        "exit_price": price,
+                        "exit_price": exit_price,
                         "entry_equity": entry_equity,
                         "exit_equity": exit_equity,
                         "pnl": pnl,
                         "return_pct": (exit_equity / entry_equity - 1.0) * 100.0,
+                        "fee": fee,
+                        "slippage": entry_slippage_cost + exit_slippage,
+                        "funding": 0.0,
+                        "qty": position_qty,
                         "reason": reason,
                         "signal": signal.signal_type.value,
                     }
@@ -422,24 +495,47 @@ class SimpleBacktester:
                 position = 0
                 entry_price = None
                 entry_equity = None
+                entry_margin = None
                 entry_ts = None
                 position_qty = None
+                position_notional = None
+                entry_slippage_cost = 0.0
 
             def open_position(new_side: int) -> None:
-                nonlocal equity, position, entry_price, entry_equity, entry_ts, position_qty
-                fee = equity * self.fee_rate
-                equity -= fee
+                nonlocal cash, equity, position, entry_price, entry_equity, entry_margin
+                nonlocal entry_ts, position_qty, position_notional, entry_slippage_cost
+                if cash <= 0:
+                    return
+                notional = self._compute_notional(cash, price)
+                if notional <= 0:
+                    return
+                side = "buy" if new_side == 1 else "sell"
+                entry_price = self._apply_slippage(price, side)
+                if entry_price <= 0:
+                    return
+                leverage = self.leverage if self.leverage > 0 else 1.0
+                position_qty = notional / entry_price
+                entry_slippage_cost = abs(entry_price - price) * position_qty
+                entry_margin = notional / leverage
+                fee = notional * self.fee_rate
+                total_cost = entry_margin + fee
+                if total_cost > cash and cash > 0:
+                    scale = cash / total_cost
+                    notional *= scale
+                    position_qty = notional / entry_price
+                    entry_slippage_cost = abs(entry_price - price) * position_qty
+                    entry_margin = notional / leverage
+                    fee = notional * self.fee_rate
+                cash -= entry_margin + fee
                 position = new_side
-                entry_price = price
-                entry_equity = equity
+                entry_equity = cash + entry_margin
                 entry_ts = ts
-                position_qty = equity / price if price else 0.0
+                position_notional = notional
                 if recorder is not None:
-                    side = "buy" if new_side == 1 else "sell"
                     recorder.record_order(
                         ts,
                         side,
-                        price,
+                        entry_price,
                         position_qty,
                         fee,
                         None,
@@ -452,8 +548,8 @@ class SimpleBacktester:
                     open_position(1)
             elif signal.signal_type == SignalType.SELL:
                 if position == 1:
-                    close_position("reverse_to_short")
-                if position == 0:
+                    close_position("reverse_to_short" if self.allow_short else "close_long")
+                if position == 0 and self.allow_short:
                     open_position(-1)
             elif signal.signal_type == SignalType.CLOSE_LONG and position == 1:
                 close_position("close_long")
@@ -461,52 +557,74 @@ class SimpleBacktester:
                 close_position("close_short")
 
             if position == 0 or entry_price is None or entry_equity is None:
-                mark_equity = equity
-            elif position == 1:
-                mark_equity = entry_equity * (price / entry_price)
+                mark_equity = cash
+            elif position == 1 and position_qty is not None and entry_margin is not None:
+                pnl = position_qty * (price - entry_price)
+                mark_equity = cash + entry_margin + pnl
+            elif position == -1 and position_qty is not None and entry_margin is not None:
+                pnl = position_qty * (entry_price - price)
+                mark_equity = cash + entry_margin + pnl
             else:
-                mark_equity = entry_equity * (entry_price / price)
+                mark_equity = cash
 
             equity_curve.append({"timestamp": ts, "equity": mark_equity})
+            equity = mark_equity
+            peak_equity = max(peak_equity, mark_equity)
+            if (
+                self.max_drawdown is not None
+                and peak_equity > 0
+                and (peak_equity - mark_equity) / peak_equity > self.max_drawdown
+            ):
+                if position != 0:
+                    close_position("max_drawdown")
+                break
 
         if position != 0 and entry_price is not None:
             last_row = candles.iloc[-1]
             price = float(last_row["close"])
             ts = int(last_row["timestamp"])
-            if position == 1:
-                gross_equity = entry_equity * (price / entry_price)
-            else:
-                gross_equity = entry_equity * (entry_price / price)
-            fee = gross_equity * self.fee_rate
-            exit_equity = gross_equity - fee
-            pnl = exit_equity - entry_equity
-            if recorder is not None:
-                side = "sell" if position == 1 else "buy"
-                recorder.record_order(
-                    ts,
-                    side,
-                    price,
-                    position_qty or 0.0,
-                    fee,
-                    pnl,
+            if position_qty is not None and entry_margin is not None:
+                exit_side = "sell" if position == 1 else "buy"
+                exit_price = self._apply_slippage(price, exit_side)
+                if position == 1:
+                    pnl = position_qty * (exit_price - entry_price)
+                else:
+                    pnl = position_qty * (entry_price - exit_price)
+                notional_exit = position_qty * exit_price
+                fee = notional_exit * self.fee_rate
+                cash += entry_margin + pnl - fee
+                exit_equity = cash
+                if recorder is not None:
+                    recorder.record_order(
+                        ts,
+                        exit_side,
+                        exit_price,
+                        position_qty or 0.0,
+                        fee,
+                        pnl,
+                    )
+                trade_log.append(
+                    {
+                        "side": "long" if position == 1 else "short",
+                        "entry_ts": entry_ts,
+                        "entry_price": entry_price,
+                        "exit_ts": ts,
+                        "exit_price": exit_price,
+                        "entry_equity": entry_equity,
+                        "exit_equity": exit_equity,
+                        "pnl": pnl,
+                        "return_pct": (exit_equity / entry_equity - 1.0) * 100.0,
+                        "fee": fee,
+                        "slippage": entry_slippage_cost
+                        + abs(exit_price - price) * position_qty,
+                        "funding": 0.0,
+                        "qty": position_qty,
+                        "reason": "final_close",
+                        "signal": "final_close",
+                    }
                 )
-            trade_log.append(
-                {
-                    "side": "long" if position == 1 else "short",
-                    "entry_ts": entry_ts,
-                    "entry_price": entry_price,
-                    "exit_ts": ts,
-                    "exit_price": price,
-                    "entry_equity": entry_equity,
-                    "exit_equity": exit_equity,
-                    "pnl": pnl,
-                    "return_pct": (exit_equity / entry_equity - 1.0) * 100.0,
-                    "reason": "final_close",
-                    "signal": "final_close",
-                }
-            )
-            equity = exit_equity
-            equity_curve[-1]["equity"] = equity
+                equity = exit_equity
+                equity_curve[-1]["equity"] = equity
 
         return {
             "trade_log": trade_log,

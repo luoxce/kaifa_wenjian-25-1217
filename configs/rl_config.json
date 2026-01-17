@@ -1,0 +1,28 @@
+{
+  "_comment_trading": "=== Trading config ===",
+  "symbol": "BTC/USDT:USDT",
+  "timeframe": "1h",
+  "initial_equity": 10000,
+  "max_position": 3.0,
+  "lookback_window": 100,
+  "transaction_fee": 0.0005,
+
+  "_comment_training": "=== Training params ===",
+  "total_timesteps": 500000,
+  "n_envs": 4,
+  "learning_rate": 0.0003,
+  "n_steps": 2048,
+  "batch_size": 64,
+  "n_epochs": 10,
+  "gamma": 0.99,
+  "gae_lambda": 0.95,
+  "clip_range": 0.2,
+  "ent_coef": 0.01,
+
+  "_comment_callbacks": "=== Callback config ===",
+  "save_dir": "models/rl",
+  "checkpoint_freq": 10000,
+  "eval_freq": 5000,
+
+  "_comment_description": "Notes: total_timesteps=train steps, n_envs=parallel envs, learning_rate=step size, gamma=discount, ent_coef=exploration."
+}

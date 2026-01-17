@@ -17,6 +17,10 @@ export default function HeaderBar({ health, onHalt }: HeaderBarProps) {
   const latency = health.latency_ms ?? -1;
   const latencyState = latency < 120 ? "good" : latency < 220 ? "warn" : "bad";
   const synced = Date.now() - health.last_sync_time < 60_000;
+  const modeValue =
+    health.okx_is_demo === undefined ? "UNKNOWN" : health.okx_is_demo ? "DEMO" : "LIVE";
+  const modeTone =
+    health.okx_is_demo === undefined ? "warn" : health.okx_is_demo ? "warn" : "good";
 
   return (
     <header className="flex h-12 items-center justify-between rounded-lg border border-[#27272a] bg-[#0a0a0a]/80 px-4">
@@ -50,9 +54,21 @@ export default function HeaderBar({ health, onHalt }: HeaderBarProps) {
           icon={<ShieldCheck className="h-3.5 w-3.5" />}
         />
         <StatusPill
+          label="MODE"
+          value={modeValue}
+          tone={modeTone}
+          icon={<ShieldCheck className="h-3.5 w-3.5" />}
+        />
+        <StatusPill
           label="RISK GUARD"
           value={health.trading_enabled ? "ON" : "OFF"}
           tone={health.trading_enabled ? "good" : "warn"}
+          icon={<ShieldCheck className="h-3.5 w-3.5" />}
+        />
+        <StatusPill
+          label="WRITE"
+          value={health.api_write_enabled ? "ENABLED" : "DISABLED"}
+          tone={health.api_write_enabled ? "good" : "warn"}
           icon={<ShieldCheck className="h-3.5 w-3.5" />}
         />
         <button

@@ -152,7 +152,7 @@ python scripts/run_backtest_mvp.py --symbol BTC/USDT:USDT --timeframe 1h --strat
 - 多次回测对比（2~3 条权益曲线叠加）
 - CSV 导出（equity_curve / trades / positions）
 
-说明：滑点/下单方式/资金费等高级参数为前端建模字段，目前后端 MVP 仍只使用核心参数（symbol/timeframe/limit/fee/strategy）。
+说明：滑点、下单方式、杠杆、允许做空、最大回撤/仓位已在后端 MVP 中生效；资金费开关暂未计入回测收益（后续可扩展）。
 
 ---
 
@@ -253,6 +253,8 @@ python scripts/api_server.py --host 127.0.0.1 --port 8000
 
 读接口（示例）：
 - `/api/market/candles`
+- `/api/market/symbols`
+- `/api/market/timeframes?symbol=BTC/USDT:USDT`
 - `/api/market/funding`
 - `/api/market/prices`
 - `/api/decisions`
@@ -284,8 +286,8 @@ python scripts/api_server.py --host 127.0.0.1 --port 8000
 启动前端：
 ```bash
 cd frontend
-copy .env.example .env
-npm install
+#copy .env.example .env
+#npm install
 npm run dev
 ```
 
@@ -337,7 +339,47 @@ RISK_MIN_CONFIDENCE=0.6
 
 ---
 
-## 13. 参考文档
+## 13. 强化学习（RL）
+
+已包含 RL 模块（PPO + TradingEnv），代码位于 `src/alpha_arena/rl/`，训练脚本为 `scripts/train_rl.py`，详细说明见 `docs/RL_MODULE_GUIDE.md`。
+
+### 13.1 依赖安装
+```bash
+pip install stable-baselines3 gymnasium numpy pandas ta-lib
+```
+
+### 13.2 训练（快速/完整）
+```bash
+# 快速训练（用于验证流程）
+python scripts/train_rl.py --mode train --config configs/rl_config_fast.json
+
+# 完整训练
+python scripts/train_rl.py --mode train --config configs/rl_config.json
+```
+
+训练完成后模型保存在 `models/rl/`。
+
+### 13.3 评估
+```bash
+python scripts/train_rl.py --mode eval --model models/rl/best_model/best_model.zip --episodes 10
+```
+
+### 13.4 接入交易回路
+在 `.env` 中启用：
+```ini
+RL_ENABLED=true
+RL_MODEL_PATH=models/rl/best_model/best_model.zip
+RL_CONFIDENCE_THRESHOLD=0.7
+```
+
+运行交易回路并开启 RL：
+```bash
+python scripts/main_trading_loop.py --use-rl --symbol BTC/USDT:USDT --timeframe 1h --limit 200 --executor simulated --equity 10000
+```
+
+提示：训练前确保数据库里至少有 2000 根 K 线，且 TA-Lib 安装正常。
+
+## 14. 参考文档
 
 - `架构设计/ARCHITECTURE.md`
 - `架构设计/MULTI_AGENT_ARCHITECTURE.md`
@@ -347,11 +389,12 @@ RISK_MIN_CONFIDENCE=0.6
 - `plan.md`
 - `MIGRATION_PLAN.md`
 - `API_DOCS.md`
+- `docs/RL_MODULE_GUIDE.md`
 
 ---
 
-## 14. 下一步建议
+## 15. 下一步建议
 
 - 加入更细粒度订单撮合（滑点/部分成交）
 - 完善回测成本与资金费模型
-- 强化学习模块先占位，后续再接入
+- 强化学习模块已接入，后续可扩展奖励函数与多资产训练

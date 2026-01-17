@@ -59,6 +59,7 @@ export const parseTrades = (raw: unknown): BacktestTrade[] => {
     const exitEquity = toNumber(trade.exit_equity, 0);
     const pnl = toNumber(trade.pnl, 0);
     const pnlPct = toNumber(trade.return_pct, 0);
+    const qty = toNumber(trade.qty, 0) || (entryPrice ? entryEquity / entryPrice : 0);
     return {
       id: `${idx + 1}`,
       entryTime: entryTs ? toIso(entryTs) : "",
@@ -66,12 +67,12 @@ export const parseTrades = (raw: unknown): BacktestTrade[] => {
       side: (trade.side as "long" | "short") || "long",
       entryPrice,
       exitPrice,
-      qty: entryPrice ? entryEquity / entryPrice : 0,
+      qty,
       pnl,
       pnlPct,
-      fee: 0,
-      funding: 0,
-      slippage: 0,
+      fee: toNumber(trade.fee, 0),
+      funding: toNumber(trade.funding, 0),
+      slippage: toNumber(trade.slippage, 0),
       durationSec: entryTs && exitTs ? Math.max(exitTs - entryTs, 0) / 1000 : 0,
       reason: typeof trade.reason === "string" ? trade.reason : undefined,
     };
@@ -187,6 +188,9 @@ export const buildSummary = ({
   const calmar = mdd > 0 ? cagr / mdd : 0;
   const payoffRatio = computePayoffRatio(trades);
 
+  const fundingPnl = trades.reduce((acc, trade) => acc + (trade.funding ?? 0), 0);
+  const fundingPnlRatio = initialCapital > 0 ? (fundingPnl / initialCapital) * 100 : 0;
+
   return {
     totalReturn,
     cagr,
@@ -199,8 +203,8 @@ export const buildSummary = ({
     payoffRatio,
     profitFactor,
     tradesCount: trades.length,
-    fundingPnl: 0,
-    fundingPnlRatio: 0,
+    fundingPnl,
+    fundingPnlRatio,
   };
 };
 
@@ -226,6 +230,9 @@ export const buildDetails = ({
   const totalProfit = trades.filter((t) => t.pnl > 0).reduce((acc, t) => acc + t.pnl, 0);
   const totalLoss = Math.abs(trades.filter((t) => t.pnl < 0).reduce((acc, t) => acc + t.pnl, 0));
   const grossProfit = totalProfit + totalLoss;
+  const totalFee = trades.reduce((acc, trade) => acc + (trade.fee ?? 0), 0);
+  const totalSlippage = trades.reduce((acc, trade) => acc + (trade.slippage ?? 0), 0);
+  const totalCost = totalFee + totalSlippage;
 
   return {
     returns: {
@@ -255,10 +262,10 @@ export const buildDetails = ({
       turnoverPerDay: computeTradesPerDay(trades, equityCurve),
     },
     costs: {
-      feePaid: 0,
-      slippageCost: 0,
-      costDrag: grossProfit > 0 ? (0 / grossProfit) * 100 : null,
-      avgCostPerTrade: trades.length ? 0 : null,
+      feePaid: totalFee,
+      slippageCost: totalSlippage,
+      costDrag: grossProfit > 0 ? (totalCost / grossProfit) * 100 : null,
+      avgCostPerTrade: trades.length ? totalCost / trades.length : null,
     },
     exposure: {
       maxExposure: null,
