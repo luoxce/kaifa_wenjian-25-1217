@@ -9,6 +9,7 @@ from alpha_arena.db.connection import get_connection
 from alpha_arena.execution.base_executor import BaseOrderExecutor
 from alpha_arena.models.enums import OrderSide, OrderStatus, OrderType
 from alpha_arena.models.order import Order
+from alpha_arena.utils.time import utc_now_ms, utc_now_s
 
 
 class SimulatedOrderExecutor(BaseOrderExecutor):
@@ -57,6 +58,8 @@ class SimulatedOrderExecutor(BaseOrderExecutor):
         if self.latency_ms:
             time.sleep(self.latency_ms / 1000.0)
         order = self._transition(order, OrderStatus.FILLED)
+        self._persist_trade(order)
+        self._update_position(order)
         return order
 
     def cancel_order(self, order_id: str) -> bool:
@@ -136,12 +139,165 @@ class SimulatedOrderExecutor(BaseOrderExecutor):
                 )
             conn.commit()
 
+    def _persist_trade(self, order: Order) -> None:
+        with get_connection() as conn:
+            order_row_id = self._get_order_row_id(conn, order.order_id)
+            if not order_row_id:
+                return
+            exists = conn.execute(
+                "SELECT 1 FROM trades WHERE order_id = ? LIMIT 1",
+                (order_row_id,),
+            ).fetchone()
+            if exists:
+                return
+            price = order.price or 0.0
+            conn.execute(
+                """
+                INSERT INTO trades (
+                    order_id,
+                    symbol,
+                    side,
+                    price,
+                    amount,
+                    fee,
+                    fee_currency,
+                    realized_pnl,
+                    timestamp
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    order_row_id,
+                    order.symbol,
+                    order.side.value,
+                    float(price),
+                    float(order.quantity),
+                    None,
+                    None,
+                    None,
+                    utc_now_ms(),
+                ),
+            )
+            conn.commit()
+
+    def _update_position(self, order: Order) -> None:
+        qty = float(order.quantity or 0.0)
+        if qty <= 0:
+            return
+        signed_qty = qty if order.side == OrderSide.BUY else -qty
+        with get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT side, size, entry_price
+                FROM positions
+                WHERE symbol = ?
+                ORDER BY updated_at DESC
+                """,
+                (order.symbol,),
+            ).fetchall()
+            net_size = 0.0
+            entry_price = None
+            for row in rows:
+                side = (row["side"] or "").lower()
+                size = float(row["size"] or 0.0)
+                if side in {"long", "buy"}:
+                    net_size += size
+                elif side in {"short", "sell"}:
+                    net_size -= size
+                if entry_price is None and row["entry_price"] is not None:
+                    entry_price = float(row["entry_price"])
+
+            new_net = net_size + signed_qty
+            if abs(new_net) < 1e-8:
+                conn.execute("DELETE FROM positions WHERE symbol = ?", (order.symbol,))
+                conn.commit()
+                return
+
+            price = float(order.price or entry_price or 0.0)
+            if net_size == 0 or (net_size * new_net < 0):
+                new_entry = price
+            elif net_size * signed_qty > 0:
+                base_entry = entry_price if entry_price is not None else price
+                new_entry = (abs(net_size) * base_entry + abs(signed_qty) * price) / abs(new_net)
+            else:
+                new_entry = entry_price if entry_price is not None else price
+
+            new_side = "long" if new_net > 0 else "short"
+            conn.execute("DELETE FROM positions WHERE symbol = ?", (order.symbol,))
+            conn.execute(
+                """
+                INSERT INTO positions (
+                    symbol,
+                    side,
+                    size,
+                    entry_price,
+                    leverage,
+                    unrealized_pnl,
+                    margin,
+                    liquidation_price,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    order.symbol,
+                    new_side,
+                    abs(new_net),
+                    float(new_entry),
+                    order.leverage,
+                    0.0,
+                    None,
+                    None,
+                    utc_now_s(),
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO position_snapshots (
+                    symbol,
+                    timestamp,
+                    side,
+                    size,
+                    entry_price,
+                    mark_price,
+                    unrealized_pnl,
+                    leverage,
+                    margin,
+                    liquidation_price
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(symbol, timestamp, side) DO NOTHING
+                """,
+                (
+                    order.symbol,
+                    utc_now_ms(),
+                    new_side,
+                    abs(new_net),
+                    float(new_entry),
+                    price,
+                    0.0,
+                    order.leverage,
+                    None,
+                    None,
+                ),
+            )
+            conn.commit()
+
     def _db_order_exists(self, conn, order_id: str) -> bool:
         row = conn.execute(
             "SELECT 1 FROM orders WHERE client_order_id = ? LIMIT 1",
             (order_id,),
         ).fetchone()
         return row is not None
+
+    def _get_order_row_id(self, conn, order_id: str) -> Optional[int]:
+        row = conn.execute(
+            "SELECT id FROM orders WHERE client_order_id = ? LIMIT 1",
+            (order_id,),
+        ).fetchone()
+        if not row:
+            return None
+        return int(row["id"])
 
     def _load_order(self, order_id: str) -> Optional[Order]:
         with get_connection() as conn:
