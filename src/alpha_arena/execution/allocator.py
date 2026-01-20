@@ -26,6 +26,7 @@ class PortfolioAllocator:
         data_service: Optional[DataService] = None,
         global_leverage: Optional[float] = None,
         diff_threshold: Optional[float] = None,
+        min_notional: Optional[float] = None,
     ) -> None:
         self.data_service = data_service or DataService()
         self.global_leverage = (
@@ -37,6 +38,11 @@ class PortfolioAllocator:
             diff_threshold
             if diff_threshold is not None
             else settings.portfolio_diff_threshold
+        )
+        self.min_notional = (
+            min_notional
+            if min_notional is not None
+            else settings.portfolio_min_notional
         )
 
     def build_orders(
@@ -63,6 +69,8 @@ class PortfolioAllocator:
 
         if abs(diff) < self.diff_threshold:
             return [], plan
+        if self.min_notional > 0 and abs(diff) < self.min_notional:
+            return [], plan
 
         side = OrderSide.BUY if diff > 0 else OrderSide.SELL
         quantity = abs(diff) / effective_price
@@ -81,7 +89,7 @@ class PortfolioAllocator:
     def _build_plan(self, decisions: Dict[str, float], total_equity: float) -> List[AllocationPlan]:
         plans: List[AllocationPlan] = []
         for strategy_id, weight in decisions.items():
-            if weight <= 0:
+            if weight == 0:
                 continue
             target = total_equity * weight * self.global_leverage
             plans.append(

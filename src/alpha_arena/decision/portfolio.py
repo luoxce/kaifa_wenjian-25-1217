@@ -12,7 +12,15 @@ from alpha_arena.config import settings
 from alpha_arena.data import DataService
 from alpha_arena.db.connection import get_connection
 from alpha_arena.strategies import StrategyLibrary
-from alpha_arena.strategies.indicators import adx, bollinger_bands, macd, rsi
+from alpha_arena.strategies.indicators import (
+    adx,
+    atr_percentile,
+    bollinger_bands,
+    macd,
+    price_efficiency,
+    rsi,
+    volume_trend,
+)
 
 
 @dataclass
@@ -55,13 +63,10 @@ class RegimeClassifier:
         )
 
     def classify(self, indicators: Dict[str, float]) -> str:
-        adx_val = indicators.get("ADX") or 0.0
-        bb_width = indicators.get("BB_Width") or 0.0
-        if adx_val >= self.adx_threshold:
-            return "TREND"
-        if bb_width <= self.bb_width_threshold:
-            return "RANGE"
-        return "BREAKOUT"
+        return self._detect_regime(indicators)
+
+    def _detect_regime(self, indicators: Dict[str, float]) -> str:
+        return _detect_regime(indicators, self.adx_threshold, self.bb_width_threshold)
 
 
 class StrategyPerformanceRepository:
@@ -204,6 +209,11 @@ class PortfolioScheduler:
 
 
 def _compute_indicators(candles: pd.DataFrame) -> Dict[str, float]:
+    df = _compute_indicator_frame(candles)
+    return _extract_indicators(df.iloc[-1])
+
+
+def _compute_indicator_frame(candles: pd.DataFrame) -> pd.DataFrame:
     df = candles.copy()
     df["rsi"] = rsi(df["close"], 14)
     df["adx"] = adx(df, 14)
@@ -213,15 +223,56 @@ def _compute_indicators(candles: pd.DataFrame) -> Dict[str, float]:
     df["macd_hist"] = macd_df["hist"]
     bb = bollinger_bands(df["close"])
     df["bb_width"] = bb["bandwidth"]
-    last = df.iloc[-1]
+    df["bb_width_ma"] = df["bb_width"].rolling(window=20).mean()
+    df["bb_width_ratio"] = df["bb_width"] / df["bb_width_ma"].replace(0, pd.NA)
+    df["atr_percentile"] = atr_percentile(df, period=14, lookback=100)
+    df["price_efficiency"] = price_efficiency(df, period=20)
+    df["volume_trend"] = volume_trend(df, period=20)
+    return df
+
+
+def _extract_indicators(row: pd.Series) -> Dict[str, float]:
     return {
-        "ADX": _safe_float(last["adx"]),
-        "RSI": _safe_float(last["rsi"]),
-        "BB_Width": _safe_float(last["bb_width"]),
-        "MACD": _safe_float(last["macd"]),
-        "MACD_Signal": _safe_float(last["macd_signal"]),
-        "MACD_Hist": _safe_float(last["macd_hist"]),
+        "ADX": _safe_float(row.get("adx")),
+        "RSI": _safe_float(row.get("rsi")),
+        "BB_Width": _safe_float(row.get("bb_width")),
+        "BB_Width_Ratio": _safe_float(row.get("bb_width_ratio")),
+        "MACD": _safe_float(row.get("macd")),
+        "MACD_Signal": _safe_float(row.get("macd_signal")),
+        "MACD_Hist": _safe_float(row.get("macd_hist")),
+        "ATR_Percentile": _safe_float(row.get("atr_percentile")),
+        "Price_Efficiency": _safe_float(row.get("price_efficiency")),
+        "Volume_Trend": _safe_float(row.get("volume_trend")),
     }
+
+
+def _detect_regime(
+    indicators: Dict[str, float], adx_threshold: float, bb_width_threshold: float
+) -> str:
+    adx_val = indicators.get("ADX") or 0.0
+    bb_width = indicators.get("BB_Width") or 0.0
+    bb_width_ratio = indicators.get("BB_Width_Ratio") or 0.0
+    price_eff = indicators.get("Price_Efficiency") or 0.0
+    volume_surge = indicators.get("Volume_Trend") or 0.0
+    atr_pct = indicators.get("ATR_Percentile") or 0.0
+
+    if bb_width_ratio >= 1.5 and bb_width > bb_width_threshold and volume_surge >= 0.2:
+        return "BREAKOUT"
+    if adx_val > 30 and price_eff > 0.7:
+        return "STRONG_TREND"
+    if 20 <= adx_val <= 30:
+        return "WEAK_TREND"
+    if atr_pct >= 80:
+        return "HIGH_VOLATILITY"
+    if atr_pct <= 20:
+        return "LOW_VOLATILITY"
+    if adx_val < 20 and bb_width <= bb_width_threshold:
+        return "RANGE"
+    if adx_val >= adx_threshold:
+        return "WEAK_TREND"
+    if bb_width <= bb_width_threshold:
+        return "RANGE"
+    return "BREAKOUT"
 
 
 def _safe_float(value: object) -> float:
@@ -233,12 +284,79 @@ def _safe_float(value: object) -> float:
         return 0.0
 
 
+def compute_regime_context(
+    candles: pd.DataFrame,
+    history_len: int = 5,
+    adx_threshold: Optional[float] = None,
+    bb_width_threshold: Optional[float] = None,
+) -> Dict[str, object]:
+    if candles.empty:
+        return {
+            "current": "UNKNOWN",
+            "history": [],
+            "signals": {},
+            "indicators": {},
+        }
+
+    df = _compute_indicator_frame(candles)
+    if df.empty:
+        return {
+            "current": "UNKNOWN",
+            "history": [],
+            "signals": {},
+            "indicators": {},
+        }
+
+    adx_threshold = (
+        adx_threshold if adx_threshold is not None else settings.regime_adx_threshold
+    )
+    bb_width_threshold = (
+        bb_width_threshold
+        if bb_width_threshold is not None
+        else settings.regime_bb_width_threshold
+    )
+
+    latest = _extract_indicators(df.iloc[-1])
+    current_regime = _detect_regime(latest, adx_threshold, bb_width_threshold)
+
+    history: List[str] = []
+    for _, row in df.tail(history_len).iterrows():
+        row_indicators = _extract_indicators(row)
+        history.append(_detect_regime(row_indicators, adx_threshold, bb_width_threshold))
+
+    signals = {
+        "ADX": latest.get("ADX"),
+        "BB_Width": latest.get("BB_Width"),
+        "BB_Width_Ratio": latest.get("BB_Width_Ratio"),
+        "ATR_Percentile": latest.get("ATR_Percentile"),
+        "Price_Efficiency": latest.get("Price_Efficiency"),
+        "Volume_Trend": latest.get("Volume_Trend"),
+    }
+    return {
+        "current": current_regime,
+        "history": history,
+        "signals": signals,
+        "indicators": latest,
+    }
+
+
 def _regime_score(regime: str, regimes: Tuple[str, ...]) -> float:
+    normalized = _normalize_regime_label(regime)
     if not regimes:
         return 0.6
-    if regime in regimes:
+    if normalized in regimes:
         return 1.0
     return 0.3
+
+
+def _normalize_regime_label(regime: str) -> str:
+    mapping = {
+        "STRONG_TREND": "TREND",
+        "WEAK_TREND": "TREND",
+        "HIGH_VOLATILITY": "BREAKOUT",
+        "LOW_VOLATILITY": "RANGE",
+    }
+    return mapping.get(regime, regime)
 
 
 def _extract_strategy_key(params: object) -> str:

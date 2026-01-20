@@ -13,7 +13,7 @@ sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
 
 from alpha_arena.config import settings
 from alpha_arena.db.connection import get_connection
-from alpha_arena.decision import PortfolioDecisionEngine
+from alpha_arena.decision import DecisionEngine, PortfolioDecisionEngine
 from alpha_arena.execution import PortfolioAllocator
 from alpha_arena.execution.okx_executor import OKXOrderExecutor
 from alpha_arena.execution.order_tracker import OrderTracker
@@ -62,6 +62,12 @@ def parse_args() -> argparse.Namespace:
         help="Loop interval seconds (default: 900 = 15min).",
     )
     parser.add_argument(
+        "--decision-mode",
+        choices=("portfolio", "llm"),
+        default="portfolio",
+        help="Decision source (portfolio or llm).",
+    )
+    parser.add_argument(
         "--trade",
         action="store_true",
         help="Actually send orders (requires TRADING_ENABLED=true).",
@@ -102,14 +108,49 @@ def load_positions(symbol: str) -> List[dict]:
     return [dict(row) for row in rows]
 
 
-def run_cycle(args: argparse.Namespace) -> None:
-    decision_engine = PortfolioDecisionEngine()
-    decision = decision_engine.decide(args.symbol, args.timeframe, limit=args.limit)
-    if not decision:
-        logger.info("Decision: HOLD (no allocation)")
-        return
+def _decisions_from_llm(result) -> dict:
+    allocations = result.strategy_allocations or []
+    if not allocations:
+        return {}
+    total_position = result.total_position
+    scale = 1.0
+    sign = 1.0
+    if total_position is not None:
+        try:
+            total_val = float(total_position)
+        except (TypeError, ValueError):
+            total_val = 1.0
+        scale = abs(total_val)
+        sign = -1.0 if total_val < 0 else 1.0
+    decisions = {}
+    for alloc in allocations:
+        try:
+            weight = float(alloc.weight) * scale * sign
+        except (TypeError, ValueError):
+            continue
+        if weight == 0:
+            continue
+        decisions[alloc.strategy_id] = weight
+    return decisions
 
-    decisions = {item["strategy_id"]: item["weight"] for item in decision["allocations"]}
+
+def run_cycle(args: argparse.Namespace, decision_engine) -> None:
+    if args.decision_mode == "llm":
+        result = decision_engine.decide(args.symbol, args.timeframe, limit=args.limit)
+        if not result:
+            logger.info("Decision: HOLD (llm rejected or empty)")
+            return
+        decisions = _decisions_from_llm(result)
+        if not decisions:
+            logger.info("Decision: HOLD (llm allocations empty)")
+            return
+    else:
+        decision = decision_engine.decide(args.symbol, args.timeframe, limit=args.limit)
+        if not decision:
+            logger.info("Decision: HOLD (no allocation)")
+            return
+        decisions = {item["strategy_id"]: item["weight"] for item in decision["allocations"]}
+
     total_equity = load_total_equity(args.equity)
     if total_equity <= 0:
         logger.warning("Total equity not available; set --equity or record balances.")
@@ -182,6 +223,9 @@ def main() -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
     args = parse_args()
+    decision_engine = (
+        DecisionEngine() if args.decision_mode == "llm" else PortfolioDecisionEngine()
+    )
     tracker = OrderTracker() if args.executor == "okx" else None
     executor = OKXOrderExecutor() if args.executor == "okx" else None
 
@@ -191,7 +235,7 @@ def main() -> None:
                 executor.sync_account_state([args.symbol])
             if tracker:
                 tracker.sync_orders(only_open=True)
-            run_cycle(args)
+            run_cycle(args, decision_engine)
         except Exception as exc:
             logger.exception("Trading cycle error: %s", exc)
         time.sleep(args.interval)

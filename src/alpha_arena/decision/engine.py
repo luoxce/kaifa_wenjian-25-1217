@@ -30,18 +30,30 @@ class DecisionEngine:
         return result
 
     def _persist(self, result: DecisionResult, accepted: bool) -> None:
-        action = result.selected_strategy_id or "HOLD"
+        action = result.selected_strategy_id
+        if not action and result.strategy_allocations:
+            action = max(result.strategy_allocations, key=lambda item: item.weight).strategy_id
+        action = action or "HOLD"
         reasoning = result.reasoning
         if not accepted:
             action = "HOLD"
             if result.rejection_reason:
                 reasoning = f"rejected:{result.rejection_reason} | {reasoning}"
 
+        allocations_payload = []
+        for alloc in result.strategy_allocations:
+            if hasattr(alloc, "model_dump"):
+                allocations_payload.append(alloc.model_dump())
+            else:
+                allocations_payload.append(alloc)
+
         technical_payload = {
             "indicators": result.indicators,
             "market_data": result.market_data,
             "market_regime": result.market_regime,
             "selected_strategy_id": result.selected_strategy_id,
+            "strategy_allocations": allocations_payload,
+            "total_position": result.total_position,
             "accepted": accepted,
             "rejection_reason": result.rejection_reason,
         }

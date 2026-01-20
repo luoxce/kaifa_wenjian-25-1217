@@ -8,8 +8,12 @@ from typing import Callable, Dict, List, Optional
 from alpha_arena.data import DataService
 from alpha_arena.strategies.base import BaseStrategy
 from alpha_arena.strategies.bollinger_range import BollingerRangeStrategy
+from alpha_arena.strategies.breakout import BreakoutStrategy
 from alpha_arena.strategies.ema_trend import EMATrendStrategy
 from alpha_arena.strategies.funding_rate_arbitrage import FundingRateArbitrageStrategy
+from alpha_arena.strategies.grid_trading import GridTradingStrategy
+from alpha_arena.strategies.momentum import MomentumStrategy
+from alpha_arena.strategies.mean_reversion import MeanReversionStrategy
 
 
 StrategyFactory = Callable[[str, str, DataService, Optional[Dict]], BaseStrategy]
@@ -40,6 +44,30 @@ def _funding_factory(
     symbol: str, timeframe: str, ds: DataService, params: Optional[Dict]
 ) -> BaseStrategy:
     return FundingRateArbitrageStrategy(symbol, timeframe, ds, params=params)
+
+
+def _grid_trading_factory(
+    symbol: str, timeframe: str, ds: DataService, params: Optional[Dict]
+) -> BaseStrategy:
+    return GridTradingStrategy(symbol, timeframe, ds, params=params)
+
+
+def _breakout_factory(
+    symbol: str, timeframe: str, ds: DataService, params: Optional[Dict]
+) -> BaseStrategy:
+    return BreakoutStrategy(symbol, timeframe, ds, params=params)
+
+
+def _momentum_factory(
+    symbol: str, timeframe: str, ds: DataService, params: Optional[Dict]
+) -> BaseStrategy:
+    return MomentumStrategy(symbol, timeframe, ds, params=params)
+
+
+def _mean_reversion_factory(
+    symbol: str, timeframe: str, ds: DataService, params: Optional[Dict]
+) -> BaseStrategy:
+    return MeanReversionStrategy(symbol, timeframe, ds, params=params)
 
 
 STRATEGY_SPECS: List[StrategySpec] = [
@@ -74,36 +102,36 @@ STRATEGY_SPECS: List[StrategySpec] = [
         key="breakout",
         name="Breakout",
         enabled=False,
-        implemented=False,
-        description="Key level / channel breakout strategy (planned)",
-        factory=None,
+        implemented=True,
+        description="Key level / channel breakout strategy",
+        factory=_breakout_factory,
         regimes=("BREAKOUT", "TREND"),
     ),
     StrategySpec(
         key="grid_trading",
         name="Grid Trading",
         enabled=False,
-        implemented=False,
-        description="Arithmetic / geometric / dynamic grid (planned)",
-        factory=None,
+        implemented=True,
+        description="Equal-spaced grid strategy centered on Bollinger mid-band",
+        factory=_grid_trading_factory,
         regimes=("RANGE",),
     ),
     StrategySpec(
         key="momentum",
         name="Momentum",
         enabled=False,
-        implemented=False,
-        description="Price/volume momentum strategy (planned)",
-        factory=None,
+        implemented=True,
+        description="Multi-factor momentum strategy with confirmation",
+        factory=_momentum_factory,
         regimes=("TREND", "BREAKOUT"),
     ),
     StrategySpec(
         key="mean_reversion",
         name="Mean Reversion",
         enabled=False,
-        implemented=False,
-        description="RSI/std mean reversion strategy (planned)",
-        factory=None,
+        implemented=True,
+        description="Mean reversion strategy with Z-score and RSI",
+        factory=_mean_reversion_factory,
         regimes=("RANGE",),
     ),
     StrategySpec(

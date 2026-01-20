@@ -124,7 +124,8 @@ export default function DashboardLayout() {
     );
   }
 
-  const { health, candles, orders, positions, decisions, trades } = data;
+  const { health, account, candles, orders, positions, decisions, trades } = data;
+  const lastPrice = candles[candles.length - 1]?.close ?? 0;
   return (
     <div className="min-h-screen bg-[#050505] text-slate-100">
       <div className="grid h-screen grid-cols-[minmax(0,7fr)_minmax(0,3fr)] grid-rows-[48px_minmax(0,1fr)_minmax(0,0.55fr)] gap-3 p-3">
@@ -149,7 +150,14 @@ export default function DashboardLayout() {
           <DecisionStream decisions={decisions} />
         </div>
         <div className="col-start-1 row-start-3">
-          <ExecutionDeck positions={positions} orders={orders} trades={trades} symbol={symbol} />
+          <ExecutionDeck
+            account={account}
+            positions={positions}
+            orders={orders}
+            trades={trades}
+            symbol={symbol}
+            lastPrice={lastPrice}
+          />
         </div>
       </div>
     </div>

@@ -64,6 +64,7 @@ class Settings:
     regime_bb_width_threshold: float
     portfolio_global_leverage: float
     portfolio_diff_threshold: float
+    portfolio_min_notional: float
     okx_td_mode: str
     okx_pos_mode: str
     okx_api_key: str
@@ -121,6 +122,9 @@ class Settings:
             ),
             portfolio_diff_threshold=_get_float(
                 os.getenv("PORTFOLIO_DIFF_THRESHOLD"), 10.0
+            ),
+            portfolio_min_notional=_get_float(
+                os.getenv("PORTFOLIO_MIN_NOTIONAL"), 10.0
             ),
             okx_td_mode=os.getenv("OKX_TD_MODE", "cross"),
             okx_pos_mode=os.getenv("OKX_POS_MODE", "long_short"),

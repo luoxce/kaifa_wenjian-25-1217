@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 
@@ -93,3 +94,38 @@ def bollinger_bands(
 
 def volume_ma(series: pd.Series, period: int = 20) -> pd.Series:
     return series.rolling(window=period).mean()
+
+
+def atr_percentile(df: pd.DataFrame, period: int = 14, lookback: int = 100) -> pd.Series:
+    atr_series = atr(df, period)
+
+    def _percentile(window: np.ndarray) -> float:
+        current = window[-1]
+        if np.isnan(current):
+            return 0.0
+        values = window[~np.isnan(window)]
+        if values.size == 0:
+            return 0.0
+        sorted_vals = np.sort(values)
+        rank = np.searchsorted(sorted_vals, current, side="right")
+        return (rank / sorted_vals.size) * 100.0
+
+    return atr_series.rolling(window=lookback, min_periods=2).apply(
+        _percentile, raw=True
+    ).fillna(0.0)
+
+
+def price_efficiency(df: pd.DataFrame, period: int = 20) -> pd.Series:
+    close = df["close"].astype(float)
+    net_change = close.diff(period).abs()
+    total_move = close.diff().abs().rolling(window=period).sum()
+    efficiency = net_change / total_move.replace(0, pd.NA)
+    return efficiency.fillna(0.0)
+
+
+def volume_trend(df: pd.DataFrame, period: int = 20) -> pd.Series:
+    volume = df["volume"].astype(float).fillna(0.0)
+    vol_ma = volume.rolling(window=period).mean()
+    prev_ma = vol_ma.shift(period)
+    trend = (vol_ma - prev_ma) / prev_ma.replace(0, pd.NA)
+    return trend.fillna(0.0)
